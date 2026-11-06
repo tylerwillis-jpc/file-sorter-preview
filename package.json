@@ -1,0 +1,10 @@
+{
+  "name": "jpc-file-sorter",
+  "version": "0.2.1-beta",
+  "releaseDate": "2026-11-06",
+  "private": true,
+  "description": "Jay Paul Company File Sorter: one decision per unique file, recorded to a spreadsheet. Never moves or deletes files.",
+  "whatsNew": [
+    "People are shown by initials only (TW, KB, CH); first names removed from the app"
+  ]
+}

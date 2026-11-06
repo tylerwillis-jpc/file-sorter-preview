@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- JPC File Sorter · v0.2.1-beta · index.html -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JPC File Sorter</title>
+  <link rel="icon" type="image/png" href="public/brand/Jay%20Paul%20Company%20Logo%20Image.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply the theme before first paint: the person's saved choice, else the computer's setting.
+    (function () {
+      try {
+        var person = localStorage.getItem('jpcfs_device_person');
+        var db = JSON.parse(localStorage.getItem('TEST_jpcfs_db') || '{}');
+        var t = person && db.prefs && db.prefs[person] && db.prefs[person].theme;
+        document.documentElement.dataset.theme = t || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      } catch (e) { document.documentElement.dataset.theme = 'light'; }
+    })();
+  </script>
+  <!-- SheetJS for .xlsx export (writes files in the browser; nothing is uploaded) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+</head>
+<body>
+  <div id="app"><p style="padding:40px;font-family:sans-serif">Loading File Sorter…</p></div>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
