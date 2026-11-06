@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.1-beta · tutorial.js
+/* JPC File Sorter · v0.2.2-beta · tutorial.js
  * First-run tour with coach marks: dims the page, spotlights the element being explained
  * with a blue ring, and places a step card beside it. Keys: → / Enter next, ← back, Esc skip.
  */
@@ -15,11 +15,8 @@ function steps(ctx) {
     { center: true, eyebrow: 'Welcome', title: 'Welcome to File Sorter', body: `
       <p>The goal: one copy of every file, sorted into the right top-level folder of ${esc(ctx.propertyName)}.</p>
       <p>This is the beta. <b>Test mode is on</b>, so nothing on SharePoint is moved or deleted. Every decision goes to a test spreadsheet.</p>
-      <p>This 2-minute tour walks through each part of the screen. You can replay it any time with the <b>?</b> button in the top bar.</p>
+      <p>This 2-minute tour walks through each part of the screen, in the order you'll use it. You can replay it any time with the <b>?</b> button in the top bar.</p>
       <div class="ver">Version ${esc(ctx.version)}</div>`, next: 'Start the tour' },
-    { target: '[data-tour="profile"]', title: 'Choose your profile first', profile: true, body: `
-      <p>Every decision is saved under your name, the file you have open is held for you, and your keypad numbers are your own. So this comes before anything else.</p>
-      <p>Pick your name to continue:</p>` },
     { target: '[data-tour="view"]', title: 'Sort, Review and Issues', body: `
       <ul><li><b>Sort</b> is where you decide, one file at a time.</li><li><b>Review</b> shows what the cleanup would do with everyone's decisions. Nothing is performed.</li><li><b>Issues</b> lists the problems and ideas reported during testing.</li></ul>` },
     { target: '[data-tour="source"]', title: 'Remaining and Unsure', body: `
@@ -55,7 +52,7 @@ function steps(ctx) {
 export function startTour(ctx) {
   endTour(null);
   const list = steps(ctx);
-  active = { ctx, list, i: ctx.startAt || 0, person: ctx.person };
+  active = { ctx, list, i: ctx.startAt || 0 };
   const blocker = document.createElement('div');
   blocker.className = 'tour-dim spot';
   const ring = document.createElement('div');
@@ -78,16 +75,12 @@ function show() {
   const total = list.length;
   const tourSteps = total - 2; // welcome + summary aren't numbered
   const eyebrow = st.eyebrow || `Step ${i} of ${tourSteps}`;
-  const isProfile = !!st.profile;
-  const canNext = !isProfile || !!active.person;
   card.innerHTML = `
     <div class="eyebrow"><span>${esc(eyebrow)}</span><button class="skip" data-t="skip">Skip tour</button></div>
     <h2>${esc(st.title)}</h2>${st.body}
-    ${isProfile ? `<div class="profiles">${ctx.people.map((p) => `<button data-t="person" data-id="${p.id}" aria-pressed="${active.person === p.id}"><span class="avatar lg" style="background:${p.color}">${p.initials}</span>${esc(p.name)}</button>`).join('')}</div>
-      <div class="ver">After the beta, this becomes your Microsoft sign-in.</div>` : ''}
     <div class="foot"><div class="dots">${list.map((_, k) => `<i class="${k === i ? 'cur' : k < i ? 'done' : ''}"></i>`).join('')}</div>
       ${i > 0 ? '<button class="btn" data-t="back">Back</button>' : ''}
-      <button class="btn primary" data-t="next" ${canNext ? '' : 'disabled title="Pick your name first"'}>${esc(st.next || 'Next')}</button></div>`;
+      <button class="btn primary" data-t="next">${esc(st.next || 'Next')}</button></div>`;
   place();
   card.querySelector('[data-t="next"]')?.focus({ preventScroll: true });
 }
@@ -128,8 +121,6 @@ function place() {
 
 function go(delta) {
   const { list } = active;
-  const st = list[active.i];
-  if (delta > 0 && st.profile && !active.person) return;
   const next = active.i + delta;
   if (next >= list.length) return endTour('finished');
   if (next < 0) return;
@@ -144,11 +135,6 @@ function onCardClick(e) {
   if (t === 'next') go(1);
   else if (t === 'back') go(-1);
   else if (t === 'skip') endTour('skipped');
-  else if (t === 'person') {
-    active.person = b.dataset.id;
-    active.ctx.choosePerson(b.dataset.id); // re-renders the page under the tour
-    show();
-  }
 }
 
 function onKey(e) {
@@ -162,7 +148,7 @@ function onKey(e) {
 
 function endTour(how) {
   if (!active) return;
-  const { blocker, ring, card, ctx, person } = active;
+  const { blocker, ring, card, ctx } = active;
   blocker.remove(); ring.remove(); card.remove();
   document.querySelectorAll('.tour-lift').forEach((n) => n.classList.remove('tour-lift'));
   document.removeEventListener('keydown', onKey, true);
@@ -170,17 +156,14 @@ function endTour(how) {
   window.removeEventListener('scroll', place, true);
   active = null;
   endedAt = Date.now();
-  if (how) {
-    if (!person) return ctx.finish(how); // skipped before choosing a profile: shown again next time
-    ctx.finish(how);
-  }
+  if (how) ctx.finish(how);
 }
 
 /** One-card mini-tip the first time someone switches to Keypad mode. */
 export function maybeKeypadTip(learningFiles) {
   const target = document.querySelector('#keypad');
   if (!target || active) return;
-  const ctx = { people: [], version: '', propertyName: '', choosePerson() {}, finish() {} };
+  const ctx = { version: '', propertyName: '', finish() {} };
   active = null;
   startTour({ ...ctx, startAt: 0 });
   active.list = [{ target: '#keypad', eyebrow: 'Keypad tip', title: 'Numbers that stay put', body: `
@@ -188,7 +171,6 @@ export function maybeKeypadTip(learningFiles) {
     <p>If a folder's own key is busy, it sits on a <b>spare key</b> for that file only.</p>
     <p>For your first ${learningFiles} files the numbers are still learning. Then your 9 most-used folders lock to their keys.</p>`, next: 'Got it' }];
   active.i = 0;
-  active.person = 'tip';
   show();
   active.card.querySelector('.dots').innerHTML = '';
   active.card.querySelector('[data-t="back"]')?.remove();

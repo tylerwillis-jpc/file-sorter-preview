@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.1-beta · plan.js
+/* JPC File Sorter · v0.2.2-beta · plan.js
  * Kept-copy rule and the simulated change plan. Nothing here performs any action:
  * it only describes what a future cleanup *would* do.
  *

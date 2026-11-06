@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.1-beta · data.js
+/* JPC File Sorter · v0.2.2-beta · data.js
  * Loads the file inventory and prepares the sorting queue.
  * Phase 1: sample data. Phase 2: the duplicate report (read by header name) + a live Graph scan.
  */

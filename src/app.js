@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.1-beta · app.js
+/* JPC File Sorter · v0.2.2-beta · app.js
  * The app shell: top bar, toolbar, Sort and Review views, keyboard, modals.
  * The app never moves, renames or deletes files. It only records decisions.
  */
@@ -54,7 +54,8 @@ async function boot() {
   store.backupIfDue();
   render();
   bindGlobalEvents();
-  if (!S.person || !prefs().tourDone) openTour();
+  if (!S.person) openProfilePicker();
+  else if (!prefs().tourDone) openTour();
 }
 
 async function reloadInventory() {
@@ -571,14 +572,14 @@ function folderTrees() {
 function hasMatch(n, q) { return n.files.some((f) => f.name.toLowerCase().includes(q)) || [...n.children.values()].some((k) => hasMatch(k, q)); }
 
 // ---------- Modals ----------
-function openModal(html, { wide = false, onClose } = {}) {
+function openModal(html, { wide = false, onClose, locked = false } = {}) {
   closeModal();
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.innerHTML = `<div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">${html}</div>`;
-  ov.addEventListener('mousedown', (e) => { if (e.target === ov) closeModal(); });
+  if (!locked) ov.addEventListener('mousedown', (e) => { if (e.target === ov) closeModal(); });
   document.body.appendChild(ov);
-  S.modal = { el: ov, onClose };
+  S.modal = { el: ov, onClose, locked };
   setTimeout(() => ov.querySelector('[autofocus]')?.focus() || ov.querySelector('input, textarea, select, button')?.focus(), 0);
   renderStatus();
   return ov;
@@ -867,7 +868,7 @@ function setPerson(id) {
 }
 
 function applyTheme() {
-  const t = prefs().theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const t = prefs().theme || 'light'; // light unless the person chose dark
   document.documentElement.dataset.theme = t;
 }
 
@@ -881,13 +882,29 @@ function toast(text) {
   toastTimer = setTimeout(() => t.remove(), 3200);
 }
 
+/** First launch: choose a profile before anything else. The tour starts after. */
+function openProfilePicker() {
+  const ov = openModal(`<header><h2>Choose your profile</h2></header>
+    <div class="content">
+      <p style="margin:0">Every decision is saved under your initials, the file you have open is held for you, and your keypad numbers are your own. So this comes first.</p>
+      <div class="profiles">${PEOPLE.map((p) => `<button data-pick="${p.id}"><span class="avatar lg" style="background:${p.color}">${p.initials}</span>${esc(p.name)}</button>`).join('')}</div>
+      <div class="muted small">After the beta, your Microsoft sign-in sets this automatically.</div>
+    </div>`, { locked: true });
+  ov.querySelector('.profiles').onclick = (e) => {
+    const b = e.target.closest('[data-pick]');
+    if (!b) return;
+    closeModal();
+    setPerson(b.dataset.pick);
+    if (!prefs().tourDone) openTour(0);
+  };
+}
+
 function openTour(startAt = 0) {
   S.view = 'sort';
   if (!currentFile()) S.source = 'remaining';
   render();
   startTour({
-    startAt, version: S.pkg.version, people: PEOPLE, person: S.person, propertyName: PROPERTY.name,
-    choosePerson: (id) => { setPerson(id); },
+    startAt, version: S.pkg.version, propertyName: PROPERTY.name,
     finish: (how) => { if (S.person) store.setPrefs(S.person, { tourDone: how }); render(); },
   });
 }
@@ -929,7 +946,7 @@ const actions = {
     if (S.person) store.setPrefs(S.person, { theme: t });
     render();
   },
-  'profile-menu': (d, el) => profileMenu(el),
+  'profile-menu': (d, el) => (S.person ? profileMenu(el) : openProfilePicker()),
   'help-menu': (d, el) => helpMenu(el),
   'set-person': (d) => {
     closeMenu(); setPerson(d.val);
@@ -1023,7 +1040,6 @@ function bindGlobalEvents() {
   document.addEventListener('keydown', onKey);
   window.addEventListener('beforeunload', () => { if (S.person) store.releaseClaims(S.person); store.backup('end of session'); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') store.backup('end of session'); });
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (!prefs().theme) { applyTheme(); render(); } });
 }
 
 function onKey(e) {
@@ -1032,7 +1048,7 @@ function onKey(e) {
   const a = document.activeElement;
   const typing = a && (a.matches('input, textarea, select') || a.isContentEditable);
 
-  if (S.modal) { if (e.key === 'Escape') { e.preventDefault(); closeModal(); } return; }
+  if (S.modal) { if (e.key === 'Escape' && !S.modal.locked) { e.preventDefault(); closeModal(); } return; }
   if ($('#menu')) { if (e.key === 'Escape') closeMenu(); return; }
 
   // Folder filter box: arrows move, Enter picks, Esc closes.

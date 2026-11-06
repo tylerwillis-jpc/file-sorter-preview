@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- JPC File Sorter · v0.2.1-beta · index.html -->
+<!-- JPC File Sorter · v0.2.2-beta · index.html -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -11,13 +11,13 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
   <script>
-    // Apply the theme before first paint: the person's saved choice, else the computer's setting.
+    // Apply the theme before first paint: the person's saved choice, else light.
     (function () {
       try {
         var person = localStorage.getItem('jpcfs_device_person');
         var db = JSON.parse(localStorage.getItem('TEST_jpcfs_db') || '{}');
         var t = person && db.prefs && db.prefs[person] && db.prefs[person].theme;
-        document.documentElement.dataset.theme = t || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        document.documentElement.dataset.theme = t || 'light';
       } catch (e) { document.documentElement.dataset.theme = 'light'; }
     })();
   </script>
