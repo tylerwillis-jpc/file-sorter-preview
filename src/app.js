@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.0-beta · app.js
+/* JPC File Sorter · v0.3.1-beta · app.js
  * The app shell: top bar, toolbar, Sort and Review views, keyboard, modals.
  * The app never moves, renames or deletes files. It only records decisions.
  */
@@ -335,11 +335,32 @@ function previewBox(f) {
   return `<div class="preview" id="preview">${previewBody(f, previewer.get(f.id))}<span class="tag">${esc(previewTag(f))}</span>${open}</div>`;
 }
 
+/** Steps to let this page show SharePoint thumbnails (a browser privacy setting the person changes themselves). */
+function openThumbHelp() {
+  const site = location.origin;
+  openModal(`${modalHead('Thumbnails not showing?')}<div class="content">
+    <p style="margin:0">Thumbnails come straight from SharePoint, using your own SharePoint sign-in. Most browsers block that sign-in on other sites' pages by default, to stop tracking. You can allow it for <b>this page only</b>. Nothing else changes.</p>
+    <div class="settings-sec"><h3>Chrome</h3><ol>
+      <li>Open a new tab and go to <code>chrome://settings/cookies</code></li>
+      <li>Under <b>Allowed to use third-party cookies</b>, click <b>Add</b>.</li>
+      <li>Enter <code>${esc(site)}</code> and click <b>Add</b>.</li>
+      <li>Come back here and reload the page.</li></ol></div>
+    <div class="settings-sec"><h3>Microsoft Edge</h3><ol>
+      <li>Go to <code>edge://settings/content/cookies</code></li>
+      <li>Next to <b>Allow</b>, click <b>Add</b>.</li>
+      <li>Enter <code>${esc(site)}</code>, tick <b>Include third-party cookies on this site</b>, and click <b>Add</b>.</li>
+      <li>Reload this page.</li></ol></div>
+    <div class="settings-sec"><h3>Safari</h3><p style="margin:0">Safari can only turn this off for every site (Settings → Privacy → “Prevent cross-site tracking”), so we don't recommend it. Use Chrome or Edge for File Sorter, or wait for Microsoft sign-in, which shows thumbnails without this setting.</p></div>
+    <p class="muted small" style="margin:0">You also need to be signed in to SharePoint in this browser. Open any SharePoint page once if you're not sure.</p>
+  </div><footer><button class="btn" data-act="close-modal">Close</button></footer>`, { wide: true });
+}
+
 function previewBody(f, e) {
   if (!e || e.state === 'loading') return '<div class="pv-loading">Loading thumbnail…</div>';
   if (e.state === 'ok') return `<img class="pv-thumb" src="${esc(e.src)}" alt="Thumbnail of ${esc(f.name)}" referrerpolicy="no-referrer">`;
   if (e.state === 'none') {
-    const why = e.reason === 'large' ? 'Too large to preview here.' : e.reason === 'type' ? 'No preview for this file type.' : 'No thumbnail available. You may need to be signed in to SharePoint in this browser.';
+    const why = e.reason === 'large' ? 'Too large to preview here.' : e.reason === 'type' ? 'No preview for this file type.'
+      : 'No thumbnail. If none load, your browser may be blocking SharePoint here. <a href="#" data-act="thumb-help">How to fix</a>.';
     return `<div class="pv-placeholder"><div class="big" style="background:${typeColor(f.type)}">${esc((f.type || '?').toUpperCase())}</div><div><b>${esc((f.type || 'file').toUpperCase())} · ${fmtSize(f.size)}</b></div><div class="small">${why} Use “Open full file” if you need to look.</div></div>`;
   }
   // Sample data: simple drawings by file kind.
@@ -881,7 +902,7 @@ function profileMenu(el) {
     <div class="sep"></div><div class="note">Beta: pick your name. After the beta, your Microsoft sign-in sets this automatically.</div>`);
 }
 function helpMenu(el) {
-  openMenu(el, `<button data-act="tour">Replay the tour</button><button data-act="rules">Sorting rules</button><button data-act="settings">${isAdmin() ? 'Settings (admin)' : 'Settings'}</button><div class="sep"></div><button data-act="about">About · v${esc(S.pkg.version)}</button>`);
+  openMenu(el, `<button data-act="tour">Replay the tour</button><button data-act="rules">Sorting rules</button><button data-act="thumb-help">Thumbnails not showing?</button><button data-act="settings">${isAdmin() ? 'Settings (admin)' : 'Settings'}</button><div class="sep"></div><button data-act="about">About · v${esc(S.pkg.version)}</button>`);
 }
 
 function setPerson(id) {
@@ -958,6 +979,7 @@ const actions = {
     S.source = dec ? 'unsure' : 'remaining'; showFile(f); render();
   },
   report: () => openReport(),
+  'thumb-help': () => { closeMenu(); openThumbHelp(); },
   'export-issues': () => exportIssues({ issues: store.issues(), version: S.pkg.version, person: me()?.initials || '', initialsOf }),
   'if-person': (d) => { S.issues.person = d.val; render(); },
   'if-status': (d) => { S.issues.status = d.val; render(); },

@@ -1,14 +1,10 @@
 {
   "name": "jpc-file-sorter",
-  "version": "0.3.0-beta",
+  "version": "0.3.1-beta",
   "releaseDate": "2026-11-06",
   "private": true,
   "description": "Jay Paul Company File Sorter: one decision per unique file, recorded to a spreadsheet. Never moves or deletes files.",
   "whatsNew": [
-    "Phase 2: loads the real duplicate report on this computer (24,217 files to sort; never published)",
-    "Thumbnails come straight from SharePoint using your own SharePoint sign-in, preloaded 12 files ahead; large or unsupported files show a placeholder",
-    "Open full file opens the kept copy in SharePoint",
-    "Placeholder suggestions from keyword rules, clearly labelled, until Claude suggestions in phase 4",
-    "Draft IT request for Microsoft access (docs/it-request.md)"
+    "When thumbnails can't load, a 'How to fix' guide explains the one browser setting that allows them (Chrome and Edge)"
   ]
 }

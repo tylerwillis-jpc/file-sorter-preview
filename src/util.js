@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.0-beta · util.js — small shared helpers */
+/* JPC File Sorter · v0.3.1-beta · util.js — small shared helpers */
 
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
