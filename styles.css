@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.2-beta · styles.css
+/* JPC File Sorter · v0.3.0-beta · styles.css
  * All colors are named theme tokens so light and dark switch cleanly.
  * Brand: JPC blue #019DDC (accents, bars, rings — never text or behind white text),
  *        darker blue #0077B3 (buttons, links, selected), JPC gray #6E767D (secondary text).
@@ -502,3 +502,4 @@ table.mini th { color: var(--text-2); font-weight: 600; }
 #is-type { grid-template-columns: repeat(3, 1fr); }
 #is-type button { min-width: 0; }
 @media (max-width: 760px) { .ibody { grid-template-columns: 1fr; } }
+.pv-thumb { max-width: calc(100% - 40px); max-height: 290px; object-fit: contain; border-radius: 4px; box-shadow: 0 4px 18px rgba(0,0,0,.15); background: #fff; }

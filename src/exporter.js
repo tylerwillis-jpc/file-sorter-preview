@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.2-beta · exporter.js
+/* JPC File Sorter · v0.3.0-beta · exporter.js
  * .xlsx exports (SheetJS, loaded in index.html). Every export starts with an "Info" row
  * carrying the app version, and file names include the date and version.
  */

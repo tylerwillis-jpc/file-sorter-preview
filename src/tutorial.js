@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.2-beta · tutorial.js
+/* JPC File Sorter · v0.3.0-beta · tutorial.js
  * First-run tour with coach marks: dims the page, spotlights the element being explained
  * with a blue ring, and places a step card beside it. Keys: → / Enter next, ← back, Esc skip.
  */

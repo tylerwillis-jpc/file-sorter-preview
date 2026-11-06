@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.2-beta · app.js
+/* JPC File Sorter · v0.3.0-beta · app.js
  * The app shell: top bar, toolbar, Sort and Review views, keyboard, modals.
  * The app never moves, renames or deletes files. It only records decisions.
  */
@@ -8,6 +8,7 @@ import { exportBackup, exportChangePlan, exportDecisions, exportIssues } from '.
 import { I } from './icons.js';
 import { assignKeys, candidateFolders, emptyKeypadState, recordUse, resetNumbers, unrecordUse } from './keypad.js';
 import { buildPlan, buildTrees, conflictChecks, countFiles, keptCopy, planForDecision, planSummary } from './plan.js';
+import { Previewer } from './previews.js';
 import { Store } from './store.js';
 import { maybeKeypadTip, startTour, tourActive } from './tutorial.js';
 import { esc, today, fmtDateTime, fmtDuration, fmtMonth, fmtSize, folderCrumb, pathParts, topFolder, typeColor, typeKind, uid } from './util.js';
@@ -46,6 +47,7 @@ const mode = () => prefs().mode || 'suggestion';
 async function boot() {
   S.pkg = await fetch('package.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ version: 'unknown' }));
   store = await new Store().init();
+  previewer = new Previewer({ largeFileBytes: DEFAULTS.largeFileBytes, onReady: onThumbReady });
   store.on(() => renderStatus());
   S.person = localStorage.getItem(DEVICE_PERSON_KEY) || null;
   if (S.person && !peopleById[S.person]) S.person = null;
@@ -60,7 +62,7 @@ async function boot() {
 
 async function reloadInventory() {
   const inv = await loadInventory({ approved: approved(), excluded: excluded() });
-  S.allFiles = inv.files; S.unapproved = inv.unapproved; S.dataSource = inv.source;
+  S.allFiles = inv.files; S.unapproved = inv.unapproved; S.dataSource = inv.source; S.realData = inv.real; S.dataMeta = inv.meta;
   S.files = applyScope(S.allFiles, { scopeFolder: setting('scopeFolder'), scopeSubfolder: setting('scopeSubfolder'), scopeFirstN: setting('scopeFirstN') });
   S.fileById = Object.fromEntries(S.allFiles.map((f) => [f.id, f]));
 }
@@ -92,20 +94,25 @@ function showFile(f) {
   preload();
 }
 
-// Preview buffer: keep the next N files' thumbnails and suggestions ready.
-const previewCache = new Map();
+// Preview buffer: keep the next N files' thumbnails loading in the background (thumbnails only, never full files).
+let previewer;
 function preload() {
   const q = available();
   const start = Math.max(0, q.findIndex((f) => f.id === S.currentId));
-  for (const f of q.slice(start, start + 1 + setting('preloadCount'))) {
-    if (!previewCache.has(f.id)) previewCache.set(f.id, { kind: f.size > setting('largeFileBytes') ? 'placeholder' : typeKind(f.type), ready: true });
-  }
+  previewer.preload(q.slice(start, start + 1 + setting('preloadCount')).map((f) => ({ file: f, copy: f.copies[0] })));
 }
 const preloadedAhead = () => {
   const q = available();
   const i = q.findIndex((f) => f.id === S.currentId);
-  return q.slice(i + 1).filter((f) => previewCache.get(f.id)?.ready).length;
+  return previewer.readyCount(q.slice(i + 1, i + 1 + setting('preloadCount')).map((f) => f.id));
 };
+/** A thumbnail finished loading: refresh only the preview box if it's the file on screen. */
+function onThumbReady(fileId) {
+  const box = document.getElementById('preview');
+  const f = S.fileById[fileId];
+  if (box && fileId === S.currentId && f) box.outerHTML = previewBox(f);
+  else if (box && S.currentId) { const tag = box.querySelector('.tag'); if (tag) tag.textContent = previewTag(S.fileById[S.currentId]); }
+}
 
 // ---------- Decisions ----------
 function baseRow(f, folder, extra = {}) {
@@ -244,6 +251,7 @@ function statusbar() {
     <div class="keys">${S.view === 'sort' ? `${keys}<span>${kc('/')} all folders</span><span>${kc('.')} unsure</span><span>${kc('0')} undo</span><span>${kc('N')} note</span>` : (S.view === 'review' ? '<span>Review: changes here update the plan and the decisions spreadsheet.</span>' : '<span>Issues are saved in this browser. Export and email them to TW.</span>')}</div>
     <div class="right">
       <a href="#" data-act="settings" title="Test scope: only these files are in the beta${isAdmin() ? '. Click to change.' : ''}">Scope: ${esc(scopeLabel)} · first ${setting('scopeFirstN')}</a>
+      <span title="${esc(S.dataSource)}">${S.realData ? `Real data · report ${esc(S.dataMeta.reportDate)}` : 'Sample data'}</span>
       <span class="testline">Test mode · Nothing on SharePoint is changed.</span>
       <span class="save-ind" id="save-ind"><i></i><span>Saved</span></span>
       <a href="#" data-act="about">v${esc(S.pkg.version)} · Test mode</a>
@@ -298,7 +306,6 @@ function fileCard(f) {
   const unapprovedTops = [...new Set(f.copies.map((c) => topFolder(c.path)).filter((t) => !approved().includes(t)))];
   if (unapprovedTops.length) hints.push(`<span class="hint">In a folder that isn't a sorting choice: ${unapprovedTops.map(esc).join(', ')}</span>`);
   if (f.reportNote) hints.push(`<span class="hint">Report note: ${esc(f.reportNote)}</span>`);
-  const pv = previewCache.get(f.id) || { kind: 'loading' };
   return `<section class="card" data-tour="file">
     <div class="file-head">
       <span class="ftype" style="background:${typeColor(f.type)}">${esc(f.type.toUpperCase())}</span>
@@ -308,20 +315,39 @@ function fileCard(f) {
       <button class="btn sm" data-act="folder-decision" title="Send every unsorted file in a folder to one top-level folder">${I.stack} Sort this whole folder</button></div>
     </div>
     ${hints.length ? `<div class="hints">${hints.join('')}</div>` : ''}
-    <div class="preview">${previewBody(f, pv)}
-      <span class="tag">${pv.kind === 'placeholder' ? 'Large file · no thumbnail' : 'Thumbnail'} · next ${preloadedAhead()} pre-loaded</span>
-      ${f.webUrl ? `<a class="open" href="${esc(f.webUrl)}" target="_blank" rel="noopener">Open full file ↗</a>` : '<a class="open" aria-disabled="true" title="Available with real SharePoint data (phase 2)">Open full file ↗</a>'}
-    </div>
+    ${previewBox(f)}
     ${notes.length ? `<div class="notes-box"><h3>Notes</h3>${notes.map((n) => `<div class="note-item">${esc(n.text)} <div class="by">${esc(n.byName)} · ${fmtDateTime(n.at)}</div></div>`).join('')}</div>` : ''}
   </section>`;
 }
 
-function previewBody(f, pv) {
-  if (pv.kind === 'loading') return '<div class="pv-loading">Loading thumbnail…</div>';
-  if (pv.kind === 'placeholder') return `<div class="pv-placeholder"><div class="big" style="background:${typeColor(f.type)}">${esc(f.type.toUpperCase())}</div><div><b>${esc(f.type.toUpperCase())} · ${fmtSize(f.size)}</b></div><div class="small">Too large to preview here. Use “Open full file” if you need to look.</div></div>`;
-  if (pv.kind === 'image') return `<div class="pv-img">${I.image}</div>`;
-  if (pv.kind === 'video') return `<div class="pv-img" style="background:linear-gradient(160deg,#2B3440,#55606C)">${I.play}</div>`;
-  if (pv.kind === 'sheet') return `<div class="pv-sheet">${Array.from({ length: 30 }, (_, i) => (i % 5 === 0 ? '<b></b>' : '<i></i>')).join('')}</div>`;
+function previewTag(f) {
+  const e = previewer.get(f.id);
+  const what = !e || e.state === 'loading' ? 'Loading thumbnail' : e.state === 'ok' ? 'Thumbnail' : e.state === 'sample' ? 'Sample preview'
+    : e.reason === 'large' ? 'Large file · no thumbnail' : 'No thumbnail';
+  return `${what} · next ${preloadedAhead()} pre-loaded`;
+}
+
+function previewBox(f) {
+  const kept = keptCopy(f, f.suggestion?.folder || null, S.manualKept[f.id]).copy;
+  const open = kept.url
+    ? `<a class="open" href="${esc(kept.url)}" target="_blank" rel="noopener" title="Opens the kept copy in SharePoint in a new tab">Open full file ↗</a>`
+    : '<a class="open" aria-disabled="true" title="Sample data: there is no real file to open">Open full file ↗</a>';
+  return `<div class="preview" id="preview">${previewBody(f, previewer.get(f.id))}<span class="tag">${esc(previewTag(f))}</span>${open}</div>`;
+}
+
+function previewBody(f, e) {
+  if (!e || e.state === 'loading') return '<div class="pv-loading">Loading thumbnail…</div>';
+  if (e.state === 'ok') return `<img class="pv-thumb" src="${esc(e.src)}" alt="Thumbnail of ${esc(f.name)}" referrerpolicy="no-referrer">`;
+  if (e.state === 'none') {
+    const why = e.reason === 'large' ? 'Too large to preview here.' : e.reason === 'type' ? 'No preview for this file type.' : 'No thumbnail available. You may need to be signed in to SharePoint in this browser.';
+    return `<div class="pv-placeholder"><div class="big" style="background:${typeColor(f.type)}">${esc((f.type || '?').toUpperCase())}</div><div><b>${esc((f.type || 'file').toUpperCase())} · ${fmtSize(f.size)}</b></div><div class="small">${why} Use “Open full file” if you need to look.</div></div>`;
+  }
+  // Sample data: simple drawings by file kind.
+  const kind = f.size > setting('largeFileBytes') ? 'large' : typeKind(f.type);
+  if (kind === 'large') return `<div class="pv-placeholder"><div class="big" style="background:${typeColor(f.type)}">${esc(f.type.toUpperCase())}</div><div><b>${esc(f.type.toUpperCase())} · ${fmtSize(f.size)}</b></div><div class="small">Too large to preview here.</div></div>`;
+  if (kind === 'image') return `<div class="pv-img">${I.image}</div>`;
+  if (kind === 'video') return `<div class="pv-img" style="background:linear-gradient(160deg,#2B3440,#55606C)">${I.play}</div>`;
+  if (kind === 'sheet') return `<div class="pv-sheet">${Array.from({ length: 30 }, (_, i) => (i % 5 === 0 ? '<b></b>' : '<i></i>')).join('')}</div>`;
   return `<div class="pv-doc"><i class="h"></i><i class="s"></i><i class="gap"></i><i></i><i></i><i style="width:80%"></i><i class="gap"></i><i></i><i style="width:70%"></i><i></i><i style="width:50%"></i></div>`;
 }
 
@@ -356,7 +382,7 @@ function suggestionPanel(f) {
     <div class="panel-head"><h2>Decision</h2>${s ? `<span class="conf ${s.confidence}">${s.confidence} confidence</span>` : ''}</div>
     <div class="panel-body">
       <div class="panel-hint">${I.keyboard}<span>Click a button, or press the key shown on it.</span></div>
-      ${s ? `<button class="suggest" data-act="pick" data-folder="${esc(s.folder)}"><div><div class="eyebrow">Claude suggests</div><div class="folder">${esc(s.folder)}</div></div><span class="kc wide">Enter</span></button>
+      ${s ? `<button class="suggest" data-act="pick" data-folder="${esc(s.folder)}"><div><div class="eyebrow">${s.placeholder ? 'Placeholder suggestion' : 'Claude suggests'}</div><div class="folder">${esc(s.folder)}</div></div><span class="kc wide">Enter</span></button>
       <div class="reason">${esc(s.reason)}${s.rule ? `<br><span class="rule">Rule used: ${esc(s.rule)}</span>` : ''}</div>`
       : '<div class="reason">No suggestion yet for this file. Pick a folder from the list.</div>'}
       ${alts.map((a, i) => `<button class="choice" data-act="pick" data-folder="${esc(a)}"><span class="kc">${i + 1}</span>${esc(a)}</button>`).join('')}
@@ -409,7 +435,7 @@ function keypadPanel(f) {
         return `<button class="kkey ${isPick ? 'pick' : ''}" data-act="pick" data-folder="${esc(slot.folder)}" title="${slot.spare ? 'Spare key: this folder\'s own key is busy or it has no number of its own' : 'Home key'}">
           <div class="top"><span class="kc">${k}</span>${isPick ? '<i class="pickdot"></i>' : ''}${slot.spare ? '<span class="spare">SPARE</span>' : ''}</div><span>${esc(slot.folder)}</span></button>`;
       }).join('')}</div>
-      <div class="legend"><span><i class="pickdot"></i>Claude's pick (also <span class="kc sm wide">Enter</span>)</span>${anySpare ? '<span><b class="spare">SPARE</b> folder\'s own key is busy</span>' : ''}${f.suggestion?.reason ? `<span class="muted">${esc(f.suggestion.reason)}</span>` : ''}</div>
+      <div class="legend"><span><i class="pickdot"></i>${f.suggestion?.placeholder ? 'Suggested pick' : "Claude's pick"} (also <span class="kc sm wide">Enter</span>)</span>${anySpare ? '<span><b class="spare">SPARE</b> folder\'s own key is busy</span>' : ''}${f.suggestion?.reason ? `<span class="muted">${esc(f.suggestion.reason)}</span>` : ''}</div>
       ${commonButtons()}
       ${S.allFoldersOpen ? allFoldersList() : ''}
     </div>${confirmBar()}
@@ -432,7 +458,7 @@ function whoCard() {
 }
 
 function speedStats(filterFn = () => true) {
-  const rows = Object.values(decisionsById()).filter((d) => d.decisionType === 'single file' && d.seconds > 0 && filterFn(d));
+  const rows = Object.values(decisionsById()).filter((d) => S.fileById[d.fileId] && d.decisionType === 'single file' && d.seconds > 0 && filterFn(d));
   const avg = rows.length ? rows.reduce((n, d) => n + Math.min(d.seconds, 600), 0) / rows.length : 0; // cap outliers at 10 min
   return { n: rows.length, avg, perHour: avg ? 3600 / avg : 0 };
 }

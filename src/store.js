@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.2.2-beta · store.js
+/* JPC File Sorter · v0.3.0-beta · store.js
  * The data layer. Every change is saved immediately — no save button.
  *
  * Phase 1 uses a LocalRemote (this browser). Phase 3 swaps in a SharePoint List remote
