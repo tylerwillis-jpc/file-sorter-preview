@@ -1,16 +1,10 @@
 {
   "name": "jpc-file-sorter",
-  "version": "0.3.2-beta",
+  "version": "0.4.1-beta",
   "releaseDate": "2026-11-11",
   "private": true,
   "description": "Jay Paul Company File Sorter: one decision per unique file, recorded to a spreadsheet. Never moves or deletes files.",
   "whatsNew": [
-    "Holding a key, double-pressing, or pressing Enter on a focused button no longer sorts files by accident; the number pad works with NumLock off; a Keyboard on/off switch turns single-key shortcuts off",
-    "Saving rebuilt: two open tabs can't overwrite each other, and a failed save says 'Not saved' instead of 'Offline'",
-    "Undo can no longer erase someone else's later Review edit or review mark; only TW or KB can mark reviewed",
-    "Backups: the day's first backup is never overwritten, reset needs a verified backup first, and every backup can be downloaded",
-    "Notes have Save and Cancel buttons and are never thrown away by clicking elsewhere",
-    "Keypad home numbers are given when a folder is chosen; a folder decision counts once",
-    "Use http://localhost:8765 for the local app (needed for Microsoft sign-in later)"
+    "Fix: removed a placeholder site path that the publish safety check (correctly) refused"
   ]
 }

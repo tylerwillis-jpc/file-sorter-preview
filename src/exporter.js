@@ -1,9 +1,9 @@
-/* JPC File Sorter · v0.3.2-beta · exporter.js
+/* JPC File Sorter · v0.4.1-beta · exporter.js
  * .xlsx exports (SheetJS, loaded in index.html). Every export starts with an "Info" row
  * carrying the app version, and file names include the date and version.
  */
 import { TEST_MODE } from './config.js';
-import { keptCopy } from './plan.js';
+import { decisionKept } from './plan.js';
 import { today } from './util.js';
 
 const prefix = () => (TEST_MODE ? 'TEST_' : '');
@@ -35,7 +35,7 @@ export const DECISION_COLUMNS = [
 export function decisionRows(files, decisionsById, notesById) {
   return files.map((f) => {
     const d = decisionsById[f.id];
-    const kept = d && d.folder !== 'Unsure' ? keptCopy(f, d.folder, d.keptPath).copy : null;
+    const kept = d && d.folder !== 'Unsure' ? decisionKept(f, d).copy : null;
     const notes = (notesById[f.id] || []).map((n) => `${n.by}: ${n.text}`).join(' | ');
     return {
       'File name': f.name,
@@ -67,16 +67,32 @@ export function exportDecisions({ files, decisionsById, notesById, version, pers
   return download(name, [['Decisions', DECISION_COLUMNS, decisionRows(files, decisionsById, notesById)]], infoLine(version, person));
 }
 
-export const PLAN_COLUMNS = ['Action', 'File', 'From path', 'To path', 'Decision by', 'Reviewed by', 'Reviewed at', 'Note', 'App version', 'Test'];
-export function exportChangePlan({ actions, version, person, peopleById }) {
+export const PLAN_COLUMNS = ['Step', 'Action', 'File', 'File ID', 'From path', 'To path', 'Kept copy', 'Copy size (bytes)', 'Copy modified', 'Duplicate check',
+  'Hold for (days)', 'Decision by', 'Decided at', 'Edited in review by', 'Reviewed by', 'Reviewed at', 'Decision app version', 'SharePoint item ID', 'Content hash', 'Note', 'Test'];
+export const CONFLICT_COLUMNS = ['Kind', 'File', 'File ID', 'Detail'];
+/**
+ * The change plan, one row per planned action, in the order a cleanup would perform them.
+ * DRAFT: always available, clearly labelled. APPROVED: only for the exact plan a reviewer approved.
+ * See docs/change-plan-schema.md.
+ */
+export function exportChangePlan({ actions, issues = [], approval, fingerprint, inventoryId, dataMeta, scope, holdDays, version, person, peopleById }) {
+  const nameOf = (id) => peopleById[id]?.name || id || '';
   const rows = actions.map((a) => ({
-    Action: a.action, File: a.file, 'From path': a.from, 'To path': a.to,
-    'Decision by': peopleById[a.decisionBy]?.name || a.decisionBy,
-    'Reviewed by': peopleById[a.reviewedBy]?.name || a.reviewedBy || '', 'Reviewed at': a.reviewedAt || '',
-    Note: a.note || '', 'App version': version, Test: TEST_MODE ? 'Yes' : 'No',
+    Step: a.step, Action: a.action, File: a.file, 'File ID': a.fileId, 'From path': a.from, 'To path': a.to, 'Kept copy': a.kept ? 'Yes' : '',
+    'Copy size (bytes)': a.size ?? '', 'Copy modified': a.modified || '', 'Duplicate check': a.duplicateCheck,
+    'Hold for (days)': a.action === 'Hold' ? holdDays : '', 'Decision by': nameOf(a.decisionBy), 'Decided at': a.decidedAt || '',
+    'Edited in review by': a.editedBy, 'Reviewed by': nameOf(a.reviewedBy), 'Reviewed at': a.reviewedAt || '', 'Decision app version': a.appVersion,
+    'SharePoint item ID': '', 'Content hash': '', Note: a.note || '', Test: TEST_MODE ? 'Yes' : 'No',
   }));
-  const name = `${prefix()}change_plan_${today()}_v${version}.xlsx`;
-  return download(name, [['Change plan', PLAN_COLUMNS, rows]], infoLine(version, person, ' · simulated only: nothing has been performed'));
+  const conflicts = issues.map((i) => ({ Kind: i.kind, File: i.fileName || '', 'File ID': i.fileId, Detail: i.detail }));
+  const kind = approval ? 'APPROVED' : 'DRAFT';
+  const status = approval
+    ? `APPROVED by ${approval.byName} at ${approval.at}`
+    : 'DRAFT: not approved, do not act on this file';
+  const extra = ` · ${status} · plan ${fingerprint} · inventory ${inventoryId}${dataMeta ? ` (report ${dataMeta.reportDate})` : ''} · scope ${scope} · ${issues.length} conflict(s)`
+    + ' · simulated only: nothing has been performed · not yet re-checked against live SharePoint (phase 3)';
+  const name = `${prefix()}change_plan_${kind}_${today()}_v${version}.xlsx`;
+  return download(name, [['Change plan', PLAN_COLUMNS, rows], ['Conflicts', CONFLICT_COLUMNS, conflicts]], infoLine(version, person, extra));
 }
 
 export const ISSUE_COLUMNS = ['Issue ID', 'Type', 'What happened', 'What I expected', 'Person', 'Time', 'App version', 'View / mode', 'File', 'Status', 'Notes', 'Test'];

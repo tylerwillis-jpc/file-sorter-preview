@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.2-beta · app.js
+/* JPC File Sorter · v0.4.1-beta · app.js
  * The app shell: top bar, toolbar, Sort and Review views, keyboard, modals.
  * The app never moves, renames or deletes files. It only records decisions.
  */
@@ -7,7 +7,7 @@ import { applyScope, loadInventory, subfoldersOf } from './data.js';
 import { exportBackup, exportChangePlan, exportDecisions, exportIssues } from './exporter.js';
 import { I } from './icons.js';
 import { assignKeys, candidateFolders, emptyKeypadState, recordUse, resetNumbers, unrecordUse } from './keypad.js';
-import { buildPlan, buildTrees, conflictChecks, countFiles, keptCopy, planForDecision, planSummary } from './plan.js';
+import { buildPlan, buildTrees, conflictChecks, countFiles, decisionKept, keptCopy, planFingerprint, planForDecision, planSummary } from './plan.js';
 import { Previewer } from './previews.js';
 import { Store } from './store.js';
 import { maybeKeypadTip, startTour, tourActive } from './tutorial.js';
@@ -65,6 +65,22 @@ async function reloadInventory() {
   S.allFiles = inv.files; S.unapproved = inv.unapproved; S.dataSource = inv.source; S.realData = inv.real; S.dataMeta = inv.meta;
   S.files = applyScope(S.allFiles, { scopeFolder: setting('scopeFolder'), scopeSubfolder: setting('scopeSubfolder'), scopeFirstN: setting('scopeFirstN') });
   S.fileById = Object.fromEntries(S.allFiles.map((f) => [f.id, f]));
+  S.inventoryId = inv.inventoryId;
+  migrateLegacyIds(inv.legacyIds || {});
+}
+
+/** Files used to be keyed by the report's group number. Move any saved records onto the new stable ids (once). */
+function migrateLegacyIds(map) {
+  const db = store.db;
+  const stale = Object.keys(map).filter((old) => db.decisions[old] || db.notes[old] || db.claims[old] || db.history.some((e) => e.items.some((i) => i.fileId === old)));
+  if (!stale.length) return;
+  store.mutate((d) => {
+    for (const old of stale) {
+      const id = map[old];
+      for (const k of ['decisions', 'notes', 'claims']) if (d[k][old] && !d[k][id]) { d[k][id] = d[k][old]; if (k === 'decisions') d[k][id].fileId = id; delete d[k][old]; }
+      for (const e of d.history) for (const it of e.items) if (it.fileId === old) { it.fileId = id; if (it.previous) it.previous.fileId = id; }
+    }
+  });
 }
 
 /** Another tab saved a change. Redraw, unless the person is typing or in a dialog (then redraw afterwards). */
@@ -124,9 +140,12 @@ function onThumbReady(fileId) {
 // ---------- Decisions ----------
 function baseRow(f, folder, extra = {}) {
   const sug = f.suggestion;
+  // Save exactly which copy is kept (for the folder actually chosen), so the plan can't change after review.
+  const kept = folder === 'Unsure' ? null : keptCopy(f, folder, S.manualKept[f.id] || null).copy;
   return {
     fileId: f.id, fileName: f.name, folder,
-    keptPath: S.manualKept[f.id] || null, keptManual: !!S.manualKept[f.id],
+    keptPath: kept?.path || null, keptManual: !!S.manualKept[f.id], keptSize: kept?.size ?? null, keptModified: kept?.modified || null,
+    copyPaths: f.copies.map((c) => c.path), inventoryId: S.inventoryId,
     suggestion: sug?.folder || '', confidence: sug?.confidence || '',
     accepted: !!sug && folder === sug.folder,
     decidedBy: S.person, decidedByName: me().name, decidedAt: new Date().toISOString(),
@@ -149,7 +168,7 @@ function decide(folder) {
   const holds = folder === 'Unsure' ? 0 : f.copies.length - 1;
   S.confirm = folder === 'Unsure'
     ? { tone: 'warn', text: `${f.name} → Unsure pile. Anyone can pick it up later.` }
-    : { tone: 'ok', text: `${f.name} → ${folder}.${holds ? ` ${holds} duplicate${holds > 1 ? 's go' : ' goes'} to Duplicate Hold (not deleted).` : ''}` };
+    : { tone: 'ok', text: `${f.name} → ${folder}.${holds ? ` Kept copy: ${folderCrumb(row.keptPath) || 'top level'}. ${holds} duplicate${holds > 1 ? 's go' : ' goes'} to Duplicate Hold (not deleted).` : ''}` };
   delete S.manualKept[f.id];
   const next = available().find((x) => x.id !== f.id) || null;
   showFile(next);
@@ -526,16 +545,50 @@ function statsCard() {
 }
 
 // ---------- Review view ----------
-function reviewView() {
+/** The plan for the current scope, worked out once per render: actions, totals, conflicts, approval state. */
+function planState() {
   const dec = decisionsById();
-  const files = S.files;
-  const decisions = Object.values(dec).filter((d) => S.fileById[d.fileId] && files.includes(S.fileById[d.fileId]));
-  const sum = planSummary(files, decisions);
-  const issues = conflictChecks(files, decisions, { maxPathLength: setting('maxPathLength') });
+  const inScope = new Set(S.files.map((f) => f.id));
+  const decisions = Object.values(dec).filter((d) => inScope.has(d.fileId));
+  const orphans = Object.values(dec).filter((d) => !S.fileById[d.fileId]); // decisions whose file isn't in this inventory
+  const actions = buildPlan(S.files, decisions);
+  const sum = planSummary(S.files, decisions);
+  // Site part of the path counts toward SharePoint's limit. Sample data has no site, so assume a typical length.
+  const sitePath = S.dataMeta?.siteBase ? new URL(S.dataMeta.siteBase).pathname : 'x'.repeat(21);
+  const issues = conflictChecks(S.allFiles, [...decisions, ...orphans], { maxPathLength: setting('maxPathLength'), sitePath, allDecisionsById: dec });
+  const fingerprint = planFingerprint(actions);
+  const approval = store.approvals().filter((a) => a.fingerprint === fingerprint && a.inventoryId === S.inventoryId).at(-1) || null;
+  const lastApproval = store.approvals().at(-1) || null;
+  const unreviewed = decisions.filter((d) => !d.reviewedBy).length;
+  const gates = [
+    { ok: decisions.length > 0, text: decisions.length ? `${decisions.length} decision${decisions.length === 1 ? '' : 's'} in the plan` : 'No decisions yet' },
+    { ok: unreviewed === 0, text: unreviewed ? `${unreviewed} not yet reviewed` : 'Every decision reviewed' },
+    { ok: issues.length === 0, text: issues.length ? `${issues.length} conflict${issues.length === 1 ? '' : 's'} to resolve` : 'No conflicts (checked against the whole library)' },
+    { ok: null, text: 'Live SharePoint re-check: arrives with sign-in (phase 3)' },
+  ];
+  return { decisions, actions, sum, issues, fingerprint, approval, lastApproval, gates, canApprove: gates.every((g) => g.ok !== false) };
+}
+
+function reviewView() {
+  const P = planState();
+  S.plan = P;
+  const { decisions, sum, issues } = P;
   const R = S.review;
+  const reviewer = !!me()?.reviewer;
+  const status = P.approval
+    ? `<b class="ok-text">Approved</b> by ${esc(P.approval.byName)} · ${fmtDateTime(P.approval.at)} · this exact plan`
+    : P.lastApproval ? '<b class="warn-text">Draft</b> · the plan changed since the last approval, so it needs approving again' : '<b class="warn-text">Draft</b> · not approved yet';
   return `<div class="review">
-    <div class="review-head"><div><h1>Review simulated changes</h1><p>What the cleanup would do with the decisions so far. Test mode: nothing is actually moved or changed.</p></div>
-      <button class="btn primary" data-act="export-plan">${I.download} Export change plan</button></div>
+    <div class="review-head"><div><h1>Review simulated changes</h1><p>What the cleanup would do with the decisions so far. Test mode: nothing is actually moved or changed.</p></div></div>
+    <div class="card approval">
+      <div class="ap-main"><div class="ap-status">Plan status: ${status}</div>
+        <ul class="gates">${P.gates.map((g) => `<li class="${g.ok === true ? 'ok' : g.ok === false ? 'no' : 'na'}">${g.ok === true ? '✓' : g.ok === false ? '✗' : '–'} ${esc(g.text)}</li>`).join('')}</ul></div>
+      <div class="ap-actions">
+        <button class="btn" data-act="export-plan" data-kind="draft">${I.download} Export draft plan</button>
+        ${P.approval ? `<button class="btn primary" data-act="export-plan" data-kind="approved">${I.download} Export approved plan</button>`
+          : `<button class="btn primary" data-act="approve-plan" ${reviewer && P.canApprove ? '' : 'disabled'} title="${reviewer ? (P.canApprove ? 'Approve exactly this plan' : 'Every check above must pass first') : 'Only TW or KB can approve'}">${I.check} Approve plan</button>`}
+      </div>
+    </div>
     <div class="sum-cards">
       <div class="card"><b>${sum.sorted}</b><span>Files sorted</span></div>
       <div class="card"><b>${sum.move}</b><span>Files that would move</span></div>
@@ -543,14 +596,14 @@ function reviewView() {
       <div class="card"><b>${sum.hold}</b><span>Duplicates to hold (not deleted)</span></div>
       <div class="card"><b>${sum.reviewed} / ${sum.total}</b><span>Reviewed</span></div>
     </div>
-    <div class="card safety">${I.shield}<div><b>Nothing is permanently deleted.</b> Duplicates go to a Duplicate Hold folder for ${setting('holdDays')} days, with a shortcut left in each old spot, and can be restored from there. They're only deleted after TW or KB signs off and the hold period ends. Only byte-identical copies are held, the kept copy is never held, and a full backup of the property folder is taken before any real cleanup.</div></div>
-    ${issues.length ? `<div class="card"><div class="panel-head"><h2>Conflict checks · ${issues.length}</h2><span class="muted small">Things a real cleanup would trip on</span></div>${issues.map((i) => `<div class="issue"><b>${esc(i.kind)}</b> ${esc(S.fileById[i.fileId]?.name)}: ${esc(i.detail)}</div>`).join('')}</div>` : ''}
+    <div class="card safety">${I.shield}<div><b>Nothing is permanently deleted.</b> Duplicates go to a Duplicate Hold folder for ${setting('holdDays')} days, with a shortcut left in each old spot, and can be restored from there. They're only deleted after TW or KB signs off and the hold period ends. Only copies verified identical are held, the kept copy is never held and keeps its own file name, and a full backup of the property folder is taken before any real cleanup.</div></div>
+    ${issues.length ? `<div class="card"><div class="panel-head"><h2>Conflict checks · ${issues.length}</h2><span class="muted small">Checked against the whole library, not just the test scope</span></div>${issues.slice(0, 50).map((i) => `<div class="issue"><b>${esc(i.kind)}</b> ${esc(S.fileById[i.fileId]?.name || i.fileName || i.fileId)}: ${esc(i.detail)}</div>`).join('')}${issues.length > 50 ? `<div class="issue">…and ${issues.length - 50} more (all are in the draft export)</div>` : ''}</div>` : ''}
     <div class="review-tools">
       <div class="seg">${[['changes', 'Changes by file'], ['tree', 'Folder tree: before → after']].map(([v, l]) => `<button data-act="review-tab" data-val="${v}" aria-pressed="${R.tab === v}">${l}</button>`).join('')}</div>
       ${R.tab === 'changes' ? `<div class="filters">
         <select data-act-change="rf-person" aria-label="Filter by person"><option value="">Everyone</option>${PEOPLE.map((p) => `<option value="${p.id}" ${R.person === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
         <select data-act-change="rf-type" aria-label="Filter by decision type"><option value="">Single + folder decisions</option><option value="single file" ${R.type === 'single file' ? 'selected' : ''}>Single files</option><option value="folder decision" ${R.type === 'folder decision' ? 'selected' : ''}>Folder decisions</option></select>
-        <label class="chk"><input type="checkbox" data-act-change="rf-changed" ${R.changed ? 'checked' : ''}> Changed from Claude</label>
+        <label class="chk"><input type="checkbox" data-act-change="rf-changed" ${R.changed ? 'checked' : ''}> Changed from suggestion</label>
         <label class="chk"><input type="checkbox" data-act-change="rf-unreviewed" ${R.unreviewed ? 'checked' : ''}> Not yet reviewed</label>
       </div>` : ''}
     </div>
@@ -588,14 +641,18 @@ function changesByFile(decisions, issues) {
 
 function decisionCard(d, issues = []) {
   const f = S.fileById[d.fileId];
-  const acts = planForDecision(f, d).filter((a) => a.action !== 'Shortcut');
+  const acts = planForDecision(f, d);
+  const nm = (p) => esc(p.split('/').at(-1));
   const line = (a) => {
-    if (a.action === 'Move') return `${esc(folderCrumb(a.from))} → ${esc(d.folder)}`;
+    if (a.action === 'Move') return `${esc(folderCrumb(a.from))} → ${esc(d.folder)} · keeps its name: ${nm(a.from)}`;
     if (a.action === 'Stays') return `Kept copy already in ${esc(d.folder)}: ${esc(folderCrumb(a.from))}`;
-    if (a.action === 'Hold') return `Duplicate in ${esc(folderCrumb(a.from))} → Duplicate Hold (not deleted) · shortcut left behind`;
-    return `${esc(folderCrumb(a.from))} · stays where it is`;
+    if (a.action === 'Hold') return `Duplicate in ${esc(folderCrumb(a.from))} → Duplicate Hold (not deleted)`;
+    if (a.action === 'Shortcut') return `Shortcut left in ${esc(folderCrumb(a.from))}, pointing to the kept copy`;
+    if (a.action === 'Blocked') return esc(a.note);
+    return `${esc(folderCrumb(a.from))} · stays where it is${a.note ? ` (${esc(a.note)})` : ''}`;
   };
-  const matches = d.folder === 'Unsure' ? 'marked Unsure' : d.accepted ? 'matches Claude' : `<span class="changed">changed from Claude (${esc(d.suggestion || 'none')})</span>`;
+  const sugWord = f.suggestion?.placeholder ? 'suggestion' : 'Claude';
+  const matches = d.folder === 'Unsure' ? 'marked Unsure' : d.accepted ? `matches ${sugWord}` : `<span class="changed">changed from ${sugWord} (${esc(d.suggestion || 'none')})</span>`;
   const reviewer = d.reviewedBy ? peopleById[d.reviewedBy]?.name : null;
   return `<article class="card dcard">
     <div class="dh"><span class="ftype" style="background:${typeColor(f.type)}">${esc(f.type.toUpperCase())}</span>
@@ -636,10 +693,13 @@ function folderTrees() {
       ${tops(t.after, 'a:')}
       ${countFiles(t.notSorted) ? node(t.notSorted, 'a:__notsorted', 0) : ''}
       ${countFiles(t.hold) ? node(t.hold, 'a:__hold', 0) : ''}
+      ${countFiles(t.leftInPlace) ? node(t.leftInPlace, 'a:__left', 0) : ''}
       <div class="tree-foot">${unchanged} other folders unchanged · ${t.shortcuts} shortcut${t.shortcuts === 1 ? '' : 's'} left in old locations · ${deletedZero} files deleted</div></div>
   </div>`;
 }
 function hasMatch(n, q) { return n.files.some((f) => f.name.toLowerCase().includes(q)) || [...n.children.values()].some((k) => hasMatch(k, q)); }
+
+const scopeText = () => (setting('scopeFolder') ? `${setting('scopeFolder')}${setting('scopeSubfolder') ? ' › ' + setting('scopeSubfolder') : ''}` : 'All folders') + ` · first ${setting('scopeFirstN')}`;
 
 // ---------- Modals ----------
 /** A write failed: say so plainly and offer the export, rather than pretending it saved. */
@@ -820,7 +880,7 @@ function openFolderDecision() {
     const batchId = uid('folder');
     const at = new Date().toISOString();
     const seconds = Math.round(((Date.now() - S.shownAt) / 1000 / list.length) * 10) / 10;
-    const rows = list.map((x) => ({ ...baseRow(x, dest), keptPath: S.manualKept[x.id] || null, decidedAt: at, decisionType: 'folder decision', folderDecisionPath: p, batchId, seconds }));
+    const rows = list.map((x) => ({ ...baseRow(x, dest), decidedAt: at, decisionType: 'folder decision', folderDecisionPath: p, batchId, seconds }));
     if (!store.saveDecisions(rows).ok) { closeModal(); showSaveError(); return; }
     store.setKeypad(S.person, recordUse(keypadState(), dest, setting('keypadLearningFiles'))); // one choice, counted once
     S.confirm = { tone: 'ok', text: `Folder decision: ${rows.length} files from ${p.replace(/\//g, ' › ')} → ${dest}.` };
@@ -1029,9 +1089,21 @@ const actions = {
   'if-person': (d) => { S.issues.person = d.val; render(); },
   'if-status': (d) => { S.issues.status = d.val; render(); },
   export: () => exportDecisions({ files: S.files, decisionsById: decisionsById(), notesById: store.db.notes, version: S.pkg.version, person: me()?.name || '' }),
-  'export-plan': () => {
-    const decs = Object.values(decisionsById()).filter((d) => S.fileById[d.fileId] && S.files.includes(S.fileById[d.fileId]));
-    exportChangePlan({ actions: buildPlan(S.files, decs), version: S.pkg.version, person: me()?.name || '', peopleById });
+  'export-plan': (d) => {
+    const P = S.plan || planState();
+    const approved = d.kind === 'approved' && P.approval;
+    exportChangePlan({ actions: P.actions, issues: P.issues, approval: approved ? P.approval : null, fingerprint: P.fingerprint, inventoryId: S.inventoryId,
+      dataMeta: S.dataMeta, scope: scopeText(), holdDays: setting('holdDays'), version: S.pkg.version, person: me()?.name || '', peopleById });
+  },
+  'approve-plan': () => {
+    const P = planState();
+    if (!me()?.reviewer) return toast('Only TW or KB can approve the plan.');
+    if (!P.canApprove) return toast('Every check must pass before the plan can be approved.');
+    if (!confirm(`Approve this plan? ${P.decisions.length} decisions, ${P.actions.length} planned actions. If anything changes afterwards, it will need approving again.`)) return;
+    const res = store.approvePlan({ id: uid('approval'), by: S.person, byName: me().name, at: new Date().toISOString(), fingerprint: P.fingerprint,
+      decisions: P.decisions.length, actions: P.actions.length, scope: scopeText(), inventoryId: S.inventoryId, appVersion: S.pkg.version });
+    if (!res.ok) return showSaveError();
+    render(); toast('Plan approved. You can now export the approved plan.');
   },
   theme: () => {
     const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -1080,7 +1152,10 @@ const changeActions = {
     const id = el.dataset.id;
     const f = S.fileById[id];
     const folder = el.value;
-    store.editDecision(id, { folder, accepted: !!f.suggestion && folder === f.suggestion.folder, editedBy: me().name, editedAt: new Date().toISOString(), reviewedBy: '', reviewedAt: '' });
+    const cur = decisionsById()[id];
+    const kept = folder === 'Unsure' ? null : (cur.keptManual ? decisionKept(f, cur).copy : keptCopy(f, folder).copy);
+    store.editDecision(id, { folder, accepted: !!f.suggestion && folder === f.suggestion.folder, keptPath: kept?.path || null, keptSize: kept?.size ?? null, keptModified: kept?.modified || null,
+      editedBy: me().name, editedAt: new Date().toISOString(), reviewedBy: '', reviewedByName: '', reviewedAt: '' });
     toast(`${f.name} → ${folder} (edited in review by ${me().name}).`);
     render();
   },

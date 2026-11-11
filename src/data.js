@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.2-beta · data.js
+/* JPC File Sorter · v0.4.1-beta · data.js
  * Loads the file inventory and prepares the sorting queue.
  * Real data from data/inventory.json when present (this computer only); otherwise made-up sample data.
  * A live Graph scan for files added since the report comes with sign-in (phase 3).
@@ -43,6 +43,7 @@ export async function loadInventory({ approved = APPROVED_FOLDERS, excluded = EX
     if (isIgnored(r.name)) continue;
     const copies = r.copies.filter((c) => !excluded.includes(topFolder(c.path)) && !isIgnored(pathParts(c.path).at(-1)));
     if (!copies.length) continue; // only lived in excluded folders: never shown, counted or planned
+    const excludedCopies = r.copies.length - copies.length; // left alone: never moved, held or counted
     for (const c of copies) {
       const top = topFolder(c.path);
       if (!approved.includes(top)) unapproved[top] = (unapproved[top] || 0) + 1;
@@ -54,12 +55,15 @@ export async function loadInventory({ approved = APPROVED_FOLDERS, excluded = EX
       ...r,
       copies,
       sample: !real,
-      duplicateCheck: copies.length > 1 ? 'confirmed identical' : 'single copy',
+      excludedCopies,
+      // The importer verifies groups (report hash + equal sizes). Sample data is made up, so it's marked as such.
+      duplicateCheck: copies.length < 2 ? 'single copy' : (r.duplicateCheck || (real ? 'unverified: no evidence in the inventory' : 'identical (sample data)')),
       reportNote: r.reportNote ? r.reportNote.replace(/PM Construction/g, 'PM Construction (= Construction & Development)') : '',
       suggestion: approved.includes(pick) ? { ...s, folder: pick, alts } : null,
     });
   }
-  return { files, unapproved, real: !!real, meta: real?.meta || null, source: real ? real.source : 'Sample data (made up)' };
+  const legacyIds = Object.fromEntries(files.filter((f) => f.legacyId).map((f) => [f.legacyId, f.id]));
+  return { files, unapproved, legacyIds, real: !!real, meta: real?.meta || null, inventoryId: real?.meta?.inventoryId || 'sample', source: real ? real.source : 'Sample data (made up)' };
 }
 
 /** Test scope: files with a copy in the scope folder (and subfolder), first N. */

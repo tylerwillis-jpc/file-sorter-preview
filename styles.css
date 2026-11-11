@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.2-beta · styles.css
+/* JPC File Sorter · v0.4.1-beta · styles.css
  * All colors are named theme tokens so light and dark switch cleanly.
  * Brand: JPC blue #019DDC (accents, bars, rings — never text or behind white text),
  *        darker blue #0077B3 (buttons, links, selected), JPC gray #6E767D (secondary text).
@@ -512,3 +512,11 @@ button.kbd-ind:hover { border-color: var(--border-strong); }
 .save-ind.error i { background: var(--danger); }
 .note-pop .note-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .note-pop .note-actions .muted { margin-right: auto; margin-top: 0; }
+.approval { display: flex; gap: 20px; align-items: center; padding: 14px 18px; flex-wrap: wrap; }
+.approval .ap-main { flex: 1; min-width: 280px; }
+.approval .ap-status { font-size: 15px; margin-bottom: 6px; }
+.approval .ap-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.gates { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; }
+.gates li.ok { color: var(--ok); } .gates li.no { color: var(--danger); } .gates li.na { color: var(--text-2); }
+.ok-text { color: var(--ok); } .warn-text { color: var(--warn); }
+.atag.Blocked { background: var(--danger-soft); color: var(--danger); }

@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.2-beta · store.js
+/* JPC File Sorter · v0.4.1-beta · store.js
  * The data layer. Every change is saved immediately — no save button.
  *
  * How saving works (this browser, until phase 3):
@@ -35,6 +35,7 @@ const emptyDb = () => ({
   prefs: {},       // personId -> {mode, theme, tourDone, keypadTipSeen, shortcutsOff, ...}
   settings: {},    // admin overrides of config DEFAULTS
   claims: {},      // fileId -> {by, at}
+  approvals: [],   // plan approvals: {id, by, byName, at, fingerprint, decisions, actions, scope, inventoryId}
 });
 
 export class Store {
@@ -145,6 +146,10 @@ export class Store {
       return true;
     });
   }
+
+  /** A reviewer approves exactly this plan (identified by its fingerprint). */
+  approvePlan(rec) { return this.mutate((db) => { (db.approvals ||= []).push(rec); }); }
+  approvals() { return this.db.approvals || []; }
 
   // ---- Notes, issues, claims, prefs, keypad, settings -----------------
   notes(fileId) { return this.db.notes[fileId] || []; }

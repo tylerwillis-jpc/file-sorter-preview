@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.2-beta · config.js
+/* JPC File Sorter · v0.4.1-beta · config.js
  * All settings live here. The version itself lives only in package.json.
  * Admin-editable settings (folders, scope, etc.) start from these defaults and
  * can be overridden in the Settings panel (stored with the test data).
@@ -36,7 +36,8 @@ export const APPROVED_FOLDERS = [
 export const FOLDER_ALIASES = { 'PM Construction': 'Construction & Development' };
 
 // Top-level folders whose files are never shown, counted or planned.
-export const EXCLUDED_FOLDERS = ['SharePoint'];
+// _Duplicate Hold is where a future cleanup puts held copies: never sort what's in it.
+export const EXCLUDED_FOLDERS = ['SharePoint', '_Duplicate Hold'];
 
 // System files ignored everywhere.
 export const IGNORED_FILE_PATTERNS = [/^\.DS_Store$/i, /^Thumbs\.db$/i, /^~\$/, /^desktop\.ini$/i];

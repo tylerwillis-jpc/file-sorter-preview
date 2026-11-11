@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.2-beta · keypad.js
+/* JPC File Sorter · v0.4.1-beta · keypad.js
  * Sticky keypad numbers. Pure functions: no DOM, no storage. Tested in tests/index.html.
  *
  * Per-person state: { homes: {folder: number}, usage: {folder: count}, sorted: number, locked: bool }

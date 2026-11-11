@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.2-beta · previews.js
+/* JPC File Sorter · v0.4.1-beta · previews.js
  * Thumbnails, never full files. Keeps the next N files' thumbnails loading in the background
  * so the next file appears instantly after each keystroke.
  *
