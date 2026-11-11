@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.1-beta · util.js — small shared helpers */
+/* JPC File Sorter · v0.3.2-beta · util.js — small shared helpers */
 
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -21,7 +21,8 @@ export function fmtDateTime(iso) {
   const d = new Date(iso);
   return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getHours() % 12 || 12}:${String(d.getMinutes()).padStart(2, '0')} ${d.getHours() < 12 ? 'am' : 'pm'}`;
 }
-export const today = () => new Date().toISOString().slice(0, 10);
+/** Today's date on this computer (not UTC), e.g. 2026-11-11. */
+export const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 export function fmtDuration(seconds) {
   if (!isFinite(seconds) || seconds <= 0) return '—';

@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.1-beta · tutorial.js
+/* JPC File Sorter · v0.3.2-beta · tutorial.js
  * First-run tour with coach marks: dims the page, spotlights the element being explained
  * with a blue ring, and places a step card beside it. Keys: → / Enter next, ← back, Esc skip.
  */
@@ -40,7 +40,7 @@ function steps(ctx) {
       <div class="keys">${kc('.')}<span>Send the file to the Unsure pile</span>${kc('0')}<span>Undo your last decision. It only undoes your own, and the file comes back on screen.</span></div>` },
     { target: '[data-tour="keyboard"]', title: 'Keyboard and number pad', body: `
       <p>Keys work anywhere on the page as soon as the app opens. No need to click first. The number pad works too.</p>
-      <p>While you're typing in a box (like a note with ${kc('N')}), keys pause and the light turns amber.</p>` },
+      <p>While you're typing in a box (like a note with ${kc('N')}), keys pause and the light turns amber. Click <b>Keyboard on</b> to turn single-key shortcuts off, if you prefer to click.</p>` },
     { target: '[data-tour="report"]', title: 'Report issue', body: `
       <p>Something odd, confusing, or a good idea? Click <b>Report issue</b>, pick Bug, Confusing or Idea, and say what happened.</p>
       <p>Issues are saved on the <b>Issues</b> tab. To send them to TW, click <b>Export issues</b> there and email the file to TW.</p>` },

@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.1-beta · app.js
+/* JPC File Sorter · v0.3.2-beta · app.js
  * The app shell: top bar, toolbar, Sort and Review views, keyboard, modals.
  * The app never moves, renames or deletes files. It only records decisions.
  */
@@ -48,12 +48,12 @@ async function boot() {
   S.pkg = await fetch('package.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ version: 'unknown' }));
   store = await new Store().init();
   previewer = new Previewer({ largeFileBytes: DEFAULTS.largeFileBytes, onReady: onThumbReady });
-  store.on(() => renderStatus());
+  store.on((st, why) => { renderStatus(); if (why === 'external') onExternalChange(); });
   S.person = localStorage.getItem(DEVICE_PERSON_KEY) || null;
   if (S.person && !peopleById[S.person]) S.person = null;
   await reloadInventory();
   applyTheme();
-  store.backupIfDue();
+  store.backupDaily();
   render();
   bindGlobalEvents();
   if (!S.person) openProfilePicker();
@@ -65,6 +65,13 @@ async function reloadInventory() {
   S.allFiles = inv.files; S.unapproved = inv.unapproved; S.dataSource = inv.source; S.realData = inv.real; S.dataMeta = inv.meta;
   S.files = applyScope(S.allFiles, { scopeFolder: setting('scopeFolder'), scopeSubfolder: setting('scopeSubfolder'), scopeFirstN: setting('scopeFirstN') });
   S.fileById = Object.fromEntries(S.allFiles.map((f) => [f.id, f]));
+}
+
+/** Another tab saved a change. Redraw, unless the person is typing or in a dialog (then redraw afterwards). */
+function onExternalChange() {
+  const a = document.activeElement;
+  if (S.modal || tourActive() || (a && a.matches('input, textarea, select'))) { S.redrawLater = true; return; }
+  render();
 }
 
 // ---------- Queue ----------
@@ -128,13 +135,16 @@ function baseRow(f, folder, extra = {}) {
   };
 }
 
+const MIN_LOOK_MS = 250; // a pick this soon after a new file appears is a double-press, not a decision
+
 function decide(folder) {
   const f = currentFile();
   if (!f || !S.person) return;
   if (folder !== 'Unsure' && !approved().includes(folder)) return;
+  if (Date.now() - S.shownAt < MIN_LOOK_MS) return;
   const seconds = Math.round((Date.now() - S.shownAt) / 100) / 10;
   const row = baseRow(f, folder, { seconds, markedUnsureBy: folder === 'Unsure' ? me().name : undefined });
-  store.saveDecisions([row]);
+  if (!store.saveDecisions([row]).ok) { showSaveError(); return; }
   if (folder !== 'Unsure') store.setKeypad(S.person, recordUse(keypadState(), folder, setting('keypadLearningFiles')));
   const holds = folder === 'Unsure' ? 0 : f.copies.length - 1;
   S.confirm = folder === 'Unsure'
@@ -149,16 +159,27 @@ function decide(folder) {
 function undo() {
   if (!S.person) return;
   const res = store.undoLast(S.person);
-  if (!res || !res.restored.length) { toast('Nothing of yours to undo.'); return; }
+  if (res?.error) { showSaveError(); return; }
+  if (!res) { toast('Nothing of yours to undo.'); return; }
+  if (!res.restored.length) {
+    const by = res.blocked.map((b) => b.by).filter(Boolean)[0];
+    toast(`Your last decision was changed in Review${by ? ` by ${by}` : ''} since, so it wasn't undone.`);
+    return;
+  }
   let ks = keypadState();
   for (const r of res.restored) if (r.removed.folder !== 'Unsure') ks = unrecordUse(ks, r.removed.folder);
   store.setKeypad(S.person, ks);
   const first = res.restored[0];
   const back = decisionsById()[first.fileId];
+  const file = S.fileById[first.fileId];
   S.view = 'sort';
   S.source = back?.folder === 'Unsure' ? 'unsure' : 'remaining';
-  showFile(S.fileById[first.fileId]);
-  S.confirm = { tone: 'warn', text: res.restored.length > 1 ? `Undid a folder decision: ${res.restored.length} files are back to unsorted.` : `Undid: ${S.fileById[first.fileId].name} is back on screen.` };
+  const onScreen = file && S.files.includes(file);
+  if (onScreen) showFile(file);
+  const name = file?.name || first.removed.fileName || 'The file';
+  S.confirm = { tone: 'warn', text: res.restored.length > 1 ? `Undid a folder decision: ${res.restored.length} files are back to unsorted.`
+    : onScreen ? `Undid: ${name} is back on screen.` : `Undid: ${name} is unsorted again (it's outside the current test scope).` };
+  if (res.blocked.length) S.confirm.text += ` ${res.blocked.length} file${res.blocked.length > 1 ? 's were' : ' was'} left alone because someone changed them in Review.`;
   render();
 }
 
@@ -167,9 +188,8 @@ function keypadState() { return store.keypad(S.person) || emptyKeypadState(); }
 function keypadLayout(f) {
   const st = keypadState();
   const cands = candidateFolders({ pick: f.suggestion?.folder, alts: f.suggestion?.alts, usage: st.usage, common: COMMON_FOLDERS, approved: approved() });
-  const { keys, state } = assignKeys(cands, st);
-  if (JSON.stringify(state.homes) !== JSON.stringify(st.homes)) store.setKeypad(S.person, state); // new homes are remembered
-  return { keys, state };
+  const { keys } = assignKeys(cands, st); // drawing never changes saved state
+  return { keys, state: st };
 }
 
 // ---------- Render: shell ----------
@@ -226,7 +246,7 @@ function toolbar() {
     <div class="tgroup" data-tour="view"><label>View</label>${seg('view', [['sort', 'Sort'], ['review', 'Review', reviewCount, true], ['issues', 'Issues', store.issues().length, true]])}</div>
     ${sortOnly ? `<div class="tgroup" data-tour="source"><label>Sort from</label>${seg('source', [['remaining', 'Remaining', queue('remaining').length, true], ['unsure', 'Unsure', queue('unsure').length]])}</div>
     <div class="tgroup" data-tour="mode"><label>Selection mode</label>${seg('mode', [['suggestion', 'Suggestion'], ['keypad', 'Keypad']])}</div>
-    <div class="tgroup" data-tour="keyboard"><label>Keyboard</label><div class="kbd-ind" id="kbd-ind">${I.keyboard}<i class="led"></i><span>Keyboard on</span></div></div>` : ''}
+    <div class="tgroup" data-tour="keyboard"><label>Keyboard</label><button class="kbd-ind" id="kbd-ind" data-act="toggle-shortcuts" title="Turn single-key shortcuts on or off">${I.keyboard}<i class="led"></i><span>Keyboard on</span></button></div>` : ''}
     <div class="spacer"></div>
     <div class="tgroup"><label>Beta</label><div class="inline">
       <button class="btn warn" data-act="report" data-tour="report">${I.chat} Report issue</button>
@@ -264,15 +284,18 @@ function renderStatus() {
   if (el) {
     const st = store.status;
     el.className = 'save-ind ' + st;
-    el.querySelector('span').textContent = st === 'saving' ? 'Saving…' : st === 'offline' ? 'Offline, will sync' : 'Saved';
-    el.title = st === 'saved' ? `Every decision is saved immediately (${store.remote.label}).` : '';
+    el.querySelector('span').textContent = st === 'error' ? 'Not saved' : 'Saved';
+    el.title = st === 'error' ? store.error : `Every decision is saved immediately (${store.label}).`;
   }
   const k = $('#kbd-ind');
   if (k) {
     const a = document.activeElement;
     const typing = a && (a.matches('input, textarea, select') || a.isContentEditable);
-    k.classList.toggle('paused', !!typing);
-    k.querySelector('span').textContent = typing ? 'Paused while typing' : 'Keyboard on';
+    const off = !!prefs().shortcutsOff;
+    k.classList.toggle('paused', !!typing && !off);
+    k.classList.toggle('off', off);
+    k.setAttribute('aria-pressed', String(!off));
+    k.querySelector('span').textContent = off ? 'Keyboard off · click to turn on' : typing ? 'Paused while typing' : 'Keyboard on';
   }
 }
 
@@ -619,6 +642,14 @@ function folderTrees() {
 function hasMatch(n, q) { return n.files.some((f) => f.name.toLowerCase().includes(q)) || [...n.children.values()].some((k) => hasMatch(k, q)); }
 
 // ---------- Modals ----------
+/** A write failed: say so plainly and offer the export, rather than pretending it saved. */
+function showSaveError() {
+  openModal(`${modalHead('Not saved')}<div class="content">
+    <p style="margin:0"><b>${esc(store.error || 'The last change could not be saved.')}</b> Nothing was lost from before it, but new decisions can't be saved in this browser right now.</p>
+    <p style="margin:0">Please export your decisions now, then tell TW (Report issue).</p>
+  </div><footer><button class="btn" data-act="close-modal">Close</button><button class="btn primary" data-act="export">Export .xlsx now</button></footer>`);
+}
+
 function openModal(html, { wide = false, onClose, locked = false } = {}) {
   closeModal();
   const ov = document.createElement('div');
@@ -724,25 +755,32 @@ function openNote() {
   const anchor = $('[data-act="note"]')?.getBoundingClientRect();
   const pop = document.createElement('div');
   pop.className = 'note-pop';
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', `Note about ${f.name}`);
   pop.style.top = `${(anchor?.bottom || 120) + 8}px`;
   pop.style.left = `${Math.max(16, (anchor?.right || 400) - 360)}px`;
-  pop.innerHTML = `<input id="note-input" maxlength="300" placeholder="Short note about ${esc(f.name)}" aria-label="Note"><div class="muted"><span class="kc sm wide">Enter</span> save and keep this file · <span class="kc sm">Esc</span> cancel</div>`;
+  pop.innerHTML = `<input id="note-input" maxlength="300" placeholder="Short note about ${esc(f.name)}" aria-label="Note">
+    <div class="note-actions"><span class="muted"><span class="kc sm wide">Enter</span> save · <span class="kc sm">Esc</span> cancel</span>
+    <button class="btn sm" data-n="cancel">Cancel</button><button class="btn sm primary" data-n="save">Save note</button></div>`;
   document.body.appendChild(pop);
   const inp = pop.querySelector('input');
   const done = () => { pop.remove(); S.modal = null; renderStatus(); };
+  const save = () => {
+    const text = inp.value.trim();
+    if (text && !store.addNote(f.id, { text, by: S.person, byName: me().name, at: new Date().toISOString(), appVersion: S.pkg.version }).ok) { done(); showSaveError(); return; }
+    done(); render(); if (text) toast('Note saved.');
+  };
   S.modal = { el: pop, onClose: null };
   inp.focus();
   inp.addEventListener('keydown', (e) => {
     e.stopPropagation();
+    if (e.isComposing) return; // let IME composition finish
     if (e.key === 'Escape') { e.preventDefault(); done(); }
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const text = inp.value.trim();
-      if (text) store.addNote(f.id, { text, by: S.person, byName: me().name, at: new Date().toISOString(), appVersion: S.pkg.version });
-      done(); render(); if (text) toast('Note saved.');
-    }
+    if (e.key === 'Enter') { e.preventDefault(); save(); }
   });
-  inp.addEventListener('blur', () => setTimeout(() => pop.isConnected && done(), 150));
+  pop.querySelector('[data-n="save"]').onclick = save;
+  pop.querySelector('[data-n="cancel"]').onclick = done;
+  // Clicking elsewhere keeps the draft open (it's never silently thrown away).
 }
 
 function openFolderDecision() {
@@ -778,14 +816,13 @@ function openFolderDecision() {
     const p = ov.querySelector('#fd-path').value;
     const dest = ov.querySelector('#fd-dest').value;
     const list = filesIn(p);
+    if (!list.length) { update(); toast('No unsorted files left in that folder.'); return; }
     const batchId = uid('folder');
     const at = new Date().toISOString();
     const seconds = Math.round(((Date.now() - S.shownAt) / 1000 / list.length) * 10) / 10;
     const rows = list.map((x) => ({ ...baseRow(x, dest), keptPath: S.manualKept[x.id] || null, decidedAt: at, decisionType: 'folder decision', folderDecisionPath: p, batchId, seconds }));
-    store.saveDecisions(rows, { batchId });
-    let ks = keypadState();
-    rows.forEach(() => { ks = recordUse(ks, dest, setting('keypadLearningFiles')); });
-    store.setKeypad(S.person, ks);
+    if (!store.saveDecisions(rows).ok) { closeModal(); showSaveError(); return; }
+    store.setKeypad(S.person, recordUse(keypadState(), dest, setting('keypadLearningFiles'))); // one choice, counted once
     S.confirm = { tone: 'ok', text: `Folder decision: ${rows.length} files from ${p.replace(/\//g, ' › ')} → ${dest}.` };
     closeModal();
     showFile(available()[0] || null);
@@ -816,7 +853,7 @@ function miniMarkdown(md) {
 function openAbout() {
   openModal(`${modalHead('About File Sorter')}<div class="content">
     <div><b>Version ${esc(S.pkg.version)}</b> · released ${esc(S.pkg.releaseDate || '')}</div>
-    <div class="attached">Test mode is on. Decisions go to test storage (${esc(store.remote.label)}). The app never moves, renames or deletes any file. Data: ${esc(S.dataSource)}.</div>
+    <div class="attached">Test mode is on. Decisions go to test storage (${esc(store.label)}). The app never moves, renames or deletes any file. Data: ${esc(S.dataSource)}.</div>
     <div><b>What's new</b><ul>${(S.pkg.whatsNew || []).map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>
   </div><footer><button class="btn" data-act="close-modal">Close</button></footer>`);
 }
@@ -850,8 +887,10 @@ function openSettings() {
     <div class="settings-sec"><h3>Speed by person and mode</h3>
       <table class="mini"><tr><th>Person</th><th>Files</th><th>Avg</th><th>Suggestion</th><th>Keypad</th></tr>${people.map(({ p, s, sm, kp }) => `<tr><td>${esc(p.name)}</td><td>${s.n}</td><td>${s.n ? s.avg.toFixed(1) + 's' : '—'}</td><td>${sm.n ? `${sm.avg.toFixed(1)}s (${sm.n})` : '—'}</td><td>${kp.n ? `${kp.avg.toFixed(1)}s (${kp.n})` : '—'}</td></tr>`).join('')}</table></div>
     <div class="settings-sec"><h3>Backups and reset</h3>
-      <div class="muted">A dated backup of the decisions is saved once a day and at the end of each session.</div>
-      <div class="inline">${store.listBackups().filter((b) => /^\d{4}-\d{2}-\d{2}$/.test(b)).slice(0, 7).map((b) => `<button class="btn sm" data-backup="${b}">${b}</button>`).join('') || '<span class="muted">No backups yet.</span>'}</div>
+      <div class="muted">The first copy of each day is kept as that day's backup (last ${14} days) and is never overwritten. The latest end-of-session copy is kept separately. Click one to download it.</div>
+      ${(() => { const b = store.listBackups(); return `<div class="inline">${b.daily.slice(0, 7).map((d) => `<button class="btn sm" data-backup="daily" data-id="${d}">${d}</button>`).join('') || '<span class="muted">No daily backups yet.</span>'}
+        ${b.session ? '<button class="btn sm" data-backup="session" data-id="session">Latest session</button>' : ''}</div>
+        ${b.reset.length ? `<div class="inline small muted">Before reset: ${b.reset.map((r) => `<button class="btn sm" data-backup="reset" data-id="${esc(r)}">${esc(r.slice(0, 16).replace('T', ' '))}</button>`).join('')}</div>` : ''}`; })()}
       <div><button class="btn sm danger" id="reset-test">Reset test data…</button></div></div>` : '<div class="muted small">Folder lists, cost cap, speed by person, backups and reset are admin settings (TW).</div>'}
   </div><footer><button class="btn" data-act="close-modal">Close</button>${admin ? '<button class="btn primary" id="set-save">Save settings</button>' : ''}</footer>`, { wide: true });
 
@@ -861,11 +900,17 @@ function openSettings() {
   };
   ov.querySelector('#sc-folder').onchange = (e) => { const sub = ov.querySelector('#sc-sub'); sub.innerHTML = '<option value="">All subfolders</option>' + Object.keys(subfoldersOf(S.allFiles, e.target.value)).sort().map((o) => `<option>${esc(o)}</option>`).join(''); };
   if (!admin) return;
-  ov.querySelectorAll('[data-backup]').forEach((b) => (b.onclick = () => exportBackup({ date: b.dataset.backup, backup: store.readBackup(b.dataset.backup), files: S.files, notesById: store.db.notes, version: S.pkg.version, person: me().name })));
+  ov.querySelectorAll('[data-backup]').forEach((b) => (b.onclick = () => {
+    const backup = store.readBackup(b.dataset.backup, b.dataset.id);
+    if (!backup) return toast('That backup could not be read.');
+    const label = b.dataset.backup === 'daily' ? b.dataset.id : b.dataset.backup === 'session' ? 'session' : `before-reset_${b.dataset.id.slice(0, 10)}`;
+    exportBackup({ date: label, backup, files: S.allFiles, notesById: store.db.notes, version: S.pkg.version, person: me().name }); // all files, not just the scope
+  }));
   ov.querySelector('#reset-test').onclick = () => {
     if (!confirm('Reset test data? This clears all TEST decisions, notes, claims and issues for everyone. A backup is saved first.')) return;
-    const key = store.resetTestData();
-    closeModal(); S.confirm = null; showFile(null); render(); toast(`Test data reset. Backup saved as ${key}.`);
+    const res = store.resetTestData();
+    if (!res.ok) { alert(res.reason); return; }
+    closeModal(); S.confirm = null; showFile(null); render(); toast('Test data reset. A full backup was saved first (Settings → Backups).');
   };
   ov.querySelector('#set-save').onclick = async () => {
     const list = ov.querySelector('#ap-list').value.split('\n').map((x) => x.trim()).filter(Boolean);
@@ -1008,11 +1053,14 @@ const actions = {
   'review-tab': (d) => { S.review.tab = d.val; render(); },
   'rf-folder': (d) => { S.review.folder = d.val; render(); },
   'mark-reviewed': (d) => {
+    if (!me()?.reviewer) return toast('Only TW or KB can mark decisions reviewed.');
     const cur = decisionsById()[d.id];
-    if (cur.reviewedBy) store.editDecision(d.id, { reviewedBy: '', reviewedAt: '' });
-    else store.editDecision(d.id, { reviewedBy: S.person, reviewedAt: new Date().toISOString() });
+    if (!cur) return;
+    if (cur.reviewedBy) store.editDecision(d.id, { reviewedBy: '', reviewedByName: '', reviewedAt: '' });
+    else store.editDecision(d.id, { reviewedBy: S.person, reviewedByName: me().name, reviewedAt: new Date().toISOString() });
     render();
   },
+  'toggle-shortcuts': () => { if (S.person) { store.setPrefs(S.person, { shortcutsOff: !prefs().shortcutsOff }); render(); } },
   'tree-toggle': (d) => {
     const key = d.key, o = S.review.open;
     const depth0 = d.depth === '0';
@@ -1052,6 +1100,8 @@ function bindGlobalEvents() {
     if (!fn) return;
     if (el.tagName === 'A') e.preventDefault();
     fn(el.dataset, el, e);
+    // After a mouse click, don't leave focus on the control, so Enter goes back to sorting.
+    if (e.detail > 0 && el.isConnected && document.activeElement === el) el.blur();
   });
   document.addEventListener('submit', (e) => {
     const form = e.target.closest('.inote-add');
@@ -1081,18 +1131,28 @@ function bindGlobalEvents() {
   });
   document.addEventListener('toggle', (e) => {
     const d = e.target.closest?.('[data-act-toggle]');
-    if (d && S.person) store.db.prefs[S.person] = { ...prefs(), [d.dataset.actToggle]: d.open };
+    if (d && S.person && !!prefs()[d.dataset.actToggle] !== d.open) store.setPrefs(S.person, { [d.dataset.actToggle]: d.open });
+    if (d && document.activeElement?.tagName === 'SUMMARY' && !d.matches(':focus-visible')) document.activeElement.blur();
   }, true);
   document.addEventListener('focusin', renderStatus);
   document.addEventListener('focusout', () => setTimeout(renderStatus, 0));
   document.addEventListener('keydown', onKey);
-  window.addEventListener('beforeunload', () => { if (S.person) store.releaseClaims(S.person); store.backup('end of session'); });
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') store.backup('end of session'); });
+  // Closing the tab releases this person's hold and keeps an end-of-session copy. Neither rewrites decisions.
+  window.addEventListener('beforeunload', () => { if (S.person) store.releaseClaims(S.person); store.backupSession(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') store.backupSession(); });
+  // Activity keeps the hold on the file on screen; it's released after the idle time with no activity.
+  const touch = () => { if (S.view === 'sort' && S.person && S.currentId) store.touchClaim(S.currentId, S.person); };
+  document.addEventListener('keydown', touch, true);
+  document.addEventListener('pointerdown', touch, true);
+  document.addEventListener('focusout', () => setTimeout(() => { if (S.redrawLater && !S.modal) { S.redrawLater = false; render(); } }, 0));
 }
+
+/** The number pad works with NumLock on or off, and on any keyboard layout. */
+const NUMPAD = { Numpad0: '0', Numpad1: '1', Numpad2: '2', Numpad3: '3', Numpad4: '4', Numpad5: '5', Numpad6: '6', Numpad7: '7', Numpad8: '8', Numpad9: '9', NumpadDecimal: '.', NumpadComma: '.', NumpadDivide: '/', NumpadEnter: 'Enter' };
 
 function onKey(e) {
   if (tourActive()) return; // the tour handles its own keys
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
   const a = document.activeElement;
   const typing = a && (a.matches('input, textarea, select') || a.isContentEditable);
 
@@ -1107,27 +1167,29 @@ function onKey(e) {
       S.folderHl = Math.max(0, Math.min(list.length - 1, S.folderHl + (e.key === 'ArrowDown' ? 1 : -1)));
       $('#folder-list').innerHTML = folderListItems();
       $('#folder-list .hl')?.scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'Enter') { e.preventDefault(); if (list[S.folderHl]) decide(list[S.folderHl]); }
+    } else if (e.key === 'Enter' && !e.repeat) { e.preventDefault(); if (list[S.folderHl]) decide(list[S.folderHl]); }
     else if (e.key === 'Escape') { e.preventDefault(); toggleAllFolders(false); }
     return;
   }
   if (typing) return; // keyboard shortcuts pause while typing
-  if (S.view !== 'sort' || !S.person) return;
+  if (S.view !== 'sort' || !S.person || prefs().shortcutsOff) return;
+  const key = NUMPAD[e.code] || e.key;
+  // A focused button or link keeps its own Enter/Space behaviour: never turn it into "accept the suggestion".
+  if ((key === 'Enter' || key === ' ') && a && a !== document.body && a.matches('button, a, summary, [tabindex]')) return;
+  const shortcut = key === 'Enter' || key === '/' || key === '.' || key === 'n' || key === 'N' || /^[0-9]$/.test(key);
+  if (!shortcut) { if (key === 'Escape' && S.allFoldersOpen) toggleAllFolders(false); return; }
+  e.preventDefault();
+  if (e.repeat) return; // holding a key down never sorts (or undoes) a run of files
   const f = currentFile();
-  const key = e.key;
-  if (key === '0') { e.preventDefault(); undo(); return; }
+  if (key === '0') { undo(); return; }
   if (!f) return;
-  if (key === 'Enter') { e.preventDefault(); if (f.suggestion) decide(f.suggestion.folder); return; }
-  if (key === '/') { e.preventDefault(); toggleAllFolders(true); return; }
-  if (key === '.' || key === 'Decimal') { e.preventDefault(); if (S.source !== 'unsure') decide('Unsure'); return; }
-  if (key === 'n' || key === 'N') { e.preventDefault(); openNote(); return; }
-  if (key === 'Escape' && S.allFoldersOpen) { toggleAllFolders(false); return; }
-  if (/^[1-9]$/.test(key)) {
-    e.preventDefault();
-    const n = +key;
-    if (mode() === 'keypad') { const slot = keypadLayout(f).keys[n]; if (slot) decide(slot.folder); }
-    else { const alt = f.suggestion?.alts?.[n - 1]; if (alt && n <= 2) decide(alt); }
-  }
+  if (key === 'Enter') { if (f.suggestion) decide(f.suggestion.folder); return; }
+  if (key === '/') { toggleAllFolders(true); return; }
+  if (key === '.') { if (S.source !== 'unsure') decide('Unsure'); return; }
+  if (key === 'n' || key === 'N') { openNote(); return; }
+  const n = +key;
+  if (mode() === 'keypad') { const slot = keypadLayout(f).keys[n]; if (slot) decide(slot.folder); }
+  else { const alt = f.suggestion?.alts?.[n - 1]; if (alt && n <= 2) decide(alt); }
 }
 
 boot().catch((err) => {

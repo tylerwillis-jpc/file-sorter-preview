@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.1-beta · sample-data.js
+/* JPC File Sorter · v0.3.2-beta · sample-data.js
  * Phase 1 sample: made-up files (one each of PDF, JPG, MP4, XLSX, CSV, DOCX and a
  * few more) with fake suggestions. No real company data. Phase 2 replaces this with
  * the duplicate report + live SharePoint scan.

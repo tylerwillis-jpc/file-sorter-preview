@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.1-beta · previews.js
+/* JPC File Sorter · v0.3.2-beta · previews.js
  * Thumbnails, never full files. Keeps the next N files' thumbnails loading in the background
  * so the next file appears instantly after each keystroke.
  *
@@ -26,7 +26,9 @@ export class Previewer {
     if (!THUMB_TYPES.has((file.type || '').toLowerCase())) return null;
     const m = copy.url.match(/^(https:\/\/[^/]+\/sites\/[^/]+)\//i);
     if (!m) return null;
-    return `${m[1]}/_layouts/15/getpreview.ashx?path=${encodeURIComponent(decodeURIComponent(copy.url))}&resolution=3`;
+    let full;
+    try { full = decodeURIComponent(copy.url); } catch { return null; } // a malformed link just gets a placeholder
+    return `${m[1]}/_layouts/15/getpreview.ashx?path=${encodeURIComponent(full)}&resolution=3`;
   }
 
   get(fileId) { return this.cache.get(fileId); }

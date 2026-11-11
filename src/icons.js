@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.3.1-beta · icons.js — inline SVG icons (stroke = currentColor) */
+/* JPC File Sorter · v0.3.2-beta · icons.js — inline SVG icons (stroke = currentColor) */
 const s = (d, extra = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ${extra}>${d}</svg>`;
 export const I = {
   keyboard: s('<rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10"/>'),
