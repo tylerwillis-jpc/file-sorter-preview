@@ -1,10 +1,17 @@
 {
   "name": "jpc-file-sorter",
-  "version": "0.4.1-beta",
-  "releaseDate": "2026-11-11",
+  "version": "0.5.0-beta",
+  "releaseDate": "2026-11-16",
   "private": true,
   "description": "Jay Paul Company File Sorter: one decision per unique file, recorded to a spreadsheet. Never moves or deletes files.",
   "whatsNew": [
-    "Fix: removed a placeholder site path that the publish safety check (correctly) refused"
+    "Stages 4 and 5: first use that explains itself, accessibility, layout and scale",
+    "Short welcome card with an optional practice file that is never saved; the full tour is still under ? > Show me around",
+    "Honest 'suggestion' wording, a context bar showing scope and data source, a slim Open preview row, and the kept copy named in the copies card",
+    "Folder decisions list every file they will send, and every file left out with the reason, before you confirm",
+    "Review handles thousands of decisions: queues (To review, Conflicts, Reviewed, All), search, 50 per page, and a 'Finished reviewing' step; opening Review is about 7x faster",
+    "Laptop fit at 1280x720: one-row toolbar, one-line status bar, Decision panel stays on screen; contrast meets WCAG AA in light and dark",
+    "Dialogs are labelled, keep keyboard focus inside and return it on close; screen readers hear each decision and undo",
+    "SheetJS bundled with the app (no CDN), a content-security policy, and a bounded preview cache"
   ]
 }

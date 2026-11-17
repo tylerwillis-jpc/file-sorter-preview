@@ -1,7 +1,10 @@
-/* JPC File Sorter · v0.4.1-beta · tutorial.js
- * First-run tour with coach marks: dims the page, spotlights the element being explained
+/* JPC File Sorter · v0.5.0-beta · tutorial.js
+ * First-run intro (one short card: practice file / start sorting / show me around), and the full tour.
+ * The tour has coach marks: dims the page, spotlights the element being explained
  * with a blue ring, and places a step card beside it. Keys: → / Enter next, ← back, Esc skip.
  */
+import { captureOpener, restoreFocus, trapTab } from './a11y.js';
+import { I } from './icons.js';
 import { esc } from './util.js';
 
 const kc = (k, wide) => `<span class="kc ${wide ? 'wide' : ''}">${k}</span>`;
@@ -14,13 +17,13 @@ function steps(ctx) {
   return [
     { center: true, eyebrow: 'Welcome', title: 'Welcome to File Sorter', body: `
       <p>The goal: one copy of every file, sorted into the right top-level folder of ${esc(ctx.propertyName)}.</p>
-      <p>This is the beta. <b>Test mode is on</b>, so nothing on SharePoint is moved or deleted. Every decision goes to a test spreadsheet.</p>
+      <p>This is the beta. <b>Test mode is on</b>, so nothing on SharePoint is moved or deleted. Your decisions are saved in this browser (test storage). Nothing on SharePoint changes.</p>
       <p>This 2-minute tour walks through each part of the screen, in the order you'll use it. You can replay it any time with the <b>?</b> button in the top bar.</p>
       <div class="ver">Version ${esc(ctx.version)}</div>`, next: 'Start the tour' },
     { target: '[data-tour="view"]', title: 'Sort, Review and Issues', body: `
       <ul><li><b>Sort</b> is where you decide, one file at a time.</li><li><b>Review</b> shows what the cleanup would do with everyone's decisions. Nothing is performed.</li><li><b>Issues</b> lists the problems and ideas reported during testing.</li></ul>` },
     { target: '[data-tour="source"]', title: 'Remaining and Unsure', body: `
-      <p><b>Remaining</b> is the shared pile of unsorted files. Everyone pulls the next one at their own pace.</p>
+      <p><b>Remaining</b> is the pile of files still to sort in this test scope. (Sharing the pile between people arrives with Microsoft sign-in.)</p>
       <p><b>Unsure</b> holds the hard ones anyone has parked. Switch here to work through them.</p>` },
     { target: '[data-tour="file"]', title: 'The file and preview', body: `
       <p>The file name, size and a small preview. The next files are pre-loaded so each one appears instantly.</p>
@@ -30,14 +33,15 @@ function steps(ctx) {
       <p>One copy is kept. The others go to <b>Duplicate Hold</b>, not deleted, with a shortcut left behind.</p>
       <p>The kept copy is picked automatically, so checking it is optional.</p>` },
     { target: '[data-tour="mode"]', title: 'Pick a selection mode', body: `
-      <ul><li><b>Suggestion:</b> Claude's pick plus two alternatives. Best while you're learning.</li>
+      <ul><li><b>Suggestion:</b> the suggested folder plus two alternatives. Best while you're learning.</li>
       <li><b>Keypad:</b> the 9 most likely folders on a number pad. Each folder keeps its number, so you get faster with practice.</li></ul>
       <p>You can switch any time. Your choice is remembered.</p>` },
     { target: '[data-tour="decision"]', title: 'Sort by click or key', body: `
-      <div class="keys">${kc('Enter', 1)}<span>Accept Claude's suggestion</span>${kc('1')}<span>${kc('2')} pick an alternative (Keypad: ${kc('1')}–${kc('9')})</span>${kc('/')}<span>Open all folders, then type to filter</span></div>
+      <div class="keys"><span class="keyset">${kc('Enter', 1)}</span><span>Accept the suggestion</span><span class="keyset">${kc('1')}${kc('2')}</span><span>Pick alternative 1 or 2</span><span class="keyset">${kc('/')}</span><span>Open all folders, then type to filter</span></div>
+      <p>In Keypad mode, use ${kc('1')}–${kc('9')} instead.</p>
       <p>Every button shows its key, so you can click or type, whichever is faster.</p>` },
     { target: '[data-tour="unsure-undo"]', title: 'Unsure and Undo', body: `
-      <div class="keys">${kc('.')}<span>Send the file to the Unsure pile</span>${kc('0')}<span>Undo your last decision. It only undoes your own, and the file comes back on screen.</span></div>` },
+      <div class="keys"><span class="keyset">${kc('.')}</span><span>Send the file to the Unsure pile</span><span class="keyset">${kc('0')}</span><span>Undo your last decision. It only undoes your own, and the file comes back on screen.</span></div>` },
     { target: '[data-tour="keyboard"]', title: 'Keyboard and number pad', body: `
       <p>Keys work anywhere on the page as soon as the app opens. No need to click first. The number pad works too.</p>
       <p>While you're typing in a box (like a note with ${kc('N')}), keys pause and the light turns amber. Click <b>Keyboard on</b> to turn single-key shortcuts off, if you prefer to click.</p>` },
@@ -49,10 +53,48 @@ function steps(ctx) {
   ];
 }
 
+/** First-run intro: one card, three rows, three ways out. finish(how) gets 'practice', 'start' or 'tour'.
+ *  Shares the tour's dialog machinery (inert page, Tab trap, focus return, key-leak guard). */
+export function startIntro(ctx) {
+  endTour(null);
+  active = { ctx, intro: true, list: [], i: 0, opener: ctx.opener !== undefined ? ctx.opener : captureOpener() };
+  const blocker = document.createElement('div');
+  blocker.className = 'tour-dim';
+  const ring = document.createElement('div');
+  ring.className = 'tour-ring';
+  ring.style.display = 'none';
+  const card = document.createElement('div');
+  card.className = 'tour-card center';
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-modal', 'true');
+  card.setAttribute('aria-labelledby', 'tour-title');
+  const sk = (k) => `<span class="kc sm">${k}</span>`;
+  const row = (icon, html) => `<li><span class="ico" aria-hidden="true">${icon}</span><span>${html}</span></li>`;
+  card.innerHTML = `
+    <div class="eyebrow"><span>Quick intro</span></div>
+    <h2 id="tour-title">Welcome, ${esc(ctx.initials)}</h2>
+    <ul class="intro-rows">
+      ${row(I.folder, `Each file gets one decision: which of the ${esc(ctx.folderCount)} top-level folders it belongs in.`)}
+      ${row(I.keyboard, `Press ${sk('Enter')} to accept the suggestion, a number key for a keypad folder, ${sk('/')} for all folders, ${sk('.')} if you're unsure, ${sk('0')} to undo.`)}
+      ${row(I.shield, `Nothing is moved or deleted. Decisions are saved in this browser only (Test Mode) and are not shared yet.`)}
+    </ul>
+    <div class="foot intro-foot">
+      <button class="intro-link" data-t="tour">Show me around</button>
+      <button class="btn" data-t="start">Start sorting</button>
+      <button class="btn primary" data-t="practice">Try a practice file</button>
+    </div>`;
+  document.body.append(blocker, ring, card);
+  document.getElementById('app')?.setAttribute('inert', '');
+  Object.assign(active, { blocker, ring, card });
+  card.addEventListener('click', onCardClick);
+  document.addEventListener('keydown', onKey, true);
+  card.querySelector('[data-t="practice"]').focus({ preventScroll: true });
+}
+
 export function startTour(ctx) {
   endTour(null);
   const list = steps(ctx);
-  active = { ctx, list, i: ctx.startAt || 0 };
+  active = { ctx, list, i: ctx.startAt || 0, opener: ctx.opener !== undefined ? ctx.opener : captureOpener() };
   const blocker = document.createElement('div');
   blocker.className = 'tour-dim spot';
   const ring = document.createElement('div');
@@ -60,7 +102,10 @@ export function startTour(ctx) {
   const card = document.createElement('div');
   card.className = 'tour-card';
   card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-modal', 'true');
+  card.setAttribute('aria-labelledby', 'tour-title');
   document.body.append(blocker, ring, card);
+  document.getElementById('app')?.setAttribute('inert', ''); // the page behind can't be tabbed to while the tour is up
   Object.assign(active, { blocker, ring, card });
   card.addEventListener('click', onCardClick);
   document.addEventListener('keydown', onKey, true);
@@ -77,7 +122,7 @@ function show() {
   const eyebrow = st.eyebrow || `Step ${i} of ${tourSteps}`;
   card.innerHTML = `
     <div class="eyebrow"><span>${esc(eyebrow)}</span><button class="skip" data-t="skip">Skip tour</button></div>
-    <h2>${esc(st.title)}</h2>${st.body}
+    <h2 id="tour-title">${esc(st.title)}</h2>${st.body}
     <div class="foot"><div class="dots">${list.map((_, k) => `<i class="${k === i ? 'cur' : k < i ? 'done' : ''}"></i>`).join('')}</div>
       ${i > 0 ? '<button class="btn" data-t="back">Back</button>' : ''}
       <button class="btn primary" data-t="next">${esc(st.next || 'Next')}</button></div>`;
@@ -86,7 +131,7 @@ function show() {
 }
 
 function place() {
-  if (!active) return;
+  if (!active || active.intro) return;
   const { list, i, card, ring, blocker } = active;
   const st = list[i];
   document.querySelectorAll('.tour-lift').forEach((n) => n.classList.remove('tour-lift'));
@@ -132,6 +177,7 @@ function onCardClick(e) {
   const b = e.target.closest('[data-t]');
   if (!b) return;
   const t = b.dataset.t;
+  if (active.intro) { if (t === 'practice' || t === 'start' || t === 'tour') endTour(t); return; }
   if (t === 'next') go(1);
   else if (t === 'back') go(-1);
   else if (t === 'skip') endTour('skipped');
@@ -140,15 +186,28 @@ function onCardClick(e) {
 function onKey(e) {
   if (!active) return;
   const k = e.key;
+  if (k === 'Tab') { trapTab(e, active.card); return; }
+  if (active.intro) {
+    // The intro has no "next": Enter or Space on a focused button does what that button says; Escape means Start sorting.
+    if ((k === 'Enter' || k === ' ') && e.target.closest?.('.tour-card button')) { e.stopPropagation(); return; }
+    if (k === 'Escape') e.preventDefault();
+    e.stopPropagation();
+    if (k === 'Escape') endTour('start');
+    else if (k === 'Enter' || k === ' ') e.preventDefault();
+    return;
+  }
+  // Enter or Space on a focused card button does what that button says (Skip, Back), not "next".
+  if ((k === 'Enter' || k === ' ') && e.target.closest?.('.tour-card button')) { e.stopPropagation(); return; }
   if (k === 'ArrowRight' || k === 'Enter') { e.preventDefault(); e.stopPropagation(); go(1); }
   else if (k === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); go(-1); }
   else if (k === 'Escape') { e.preventDefault(); e.stopPropagation(); endTour('skipped'); }
-  else if (k !== 'Tab') { e.stopPropagation(); }
+  else { e.stopPropagation(); }
 }
 
 function endTour(how) {
   if (!active) return;
-  const { blocker, ring, card, ctx } = active;
+  const { blocker, ring, card, ctx, opener } = active;
+  document.getElementById('app')?.removeAttribute('inert');
   blocker.remove(); ring.remove(); card.remove();
   document.querySelectorAll('.tour-lift').forEach((n) => n.classList.remove('tour-lift'));
   document.removeEventListener('keydown', onKey, true);
@@ -157,6 +216,7 @@ function endTour(how) {
   active = null;
   endedAt = Date.now();
   if (how) ctx.finish(how);
+  restoreFocus(opener, '[data-tour="decision"] h2'); // after the redraw; only if nothing else holds focus
 }
 
 /** One-card mini-tip the first time someone switches to Keypad mode. */

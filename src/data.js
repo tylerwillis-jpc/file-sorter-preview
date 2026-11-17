@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.4.1-beta · data.js
+/* JPC File Sorter · v0.5.0-beta · data.js
  * Loads the file inventory and prepares the sorting queue.
  * Real data from data/inventory.json when present (this computer only); otherwise made-up sample data.
  * A live Graph scan for files added since the report comes with sign-in (phase 3).

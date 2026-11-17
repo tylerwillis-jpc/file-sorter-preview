@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.4.1-beta · store.js
+/* JPC File Sorter · v0.5.0-beta · store.js
  * The data layer. Every change is saved immediately — no save button.
  *
  * How saving works (this browser, until phase 3):

@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.4.1-beta · app.js
+/* JPC File Sorter · v0.5.0-beta · app.js
  * The app shell: top bar, toolbar, Sort and Review views, keyboard, modals.
  * The app never moves, renames or deletes files. It only records decisions.
  */
@@ -7,10 +7,11 @@ import { applyScope, loadInventory, subfoldersOf } from './data.js';
 import { exportBackup, exportChangePlan, exportDecisions, exportIssues } from './exporter.js';
 import { I } from './icons.js';
 import { assignKeys, candidateFolders, emptyKeypadState, recordUse, resetNumbers, unrecordUse } from './keypad.js';
-import { buildPlan, buildTrees, conflictChecks, countFiles, decisionKept, keptCopy, planFingerprint, planForDecision, planSummary } from './plan.js';
+import { buildPlan, buildTrees, conflictChecks, countFiles, decisionKept, keptCopy, planByFile, planFingerprint, planForDecision, planSummary } from './plan.js';
+import { announce, captureOpener, initA11y, restoreFocus, trapTab } from './a11y.js';
 import { Previewer } from './previews.js';
 import { Store } from './store.js';
-import { maybeKeypadTip, startTour, tourActive } from './tutorial.js';
+import { maybeKeypadTip, startIntro, startTour, tourActive } from './tutorial.js';
 import { esc, today, fmtDateTime, fmtDuration, fmtMonth, fmtSize, folderCrumb, pathParts, topFolder, typeColor, typeKind, uid } from './util.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -28,9 +29,10 @@ const S = {
   allFoldersOpen: false, folderFilter: '', folderHl: 0,
   confirm: null,
   issues: { person: '', status: '' },
-  review: { tab: 'changes', folder: 'all', person: '', changed: false, unreviewed: false, type: '', open: new Set(), query: '' },
+  review: { tab: 'changes', queue: 'toreview', folder: 'all', person: '', changed: false, type: '', open: new Set(), query: '', search: '', page: 1 },
   kbdPaused: false,
   modal: null,
+  practice: null, // the made-up practice file while someone is trying it: { file, done: folder|null, doneAt }. Never saved.
 };
 let store;
 
@@ -42,6 +44,8 @@ const me = () => peopleById[S.person];
 const isAdmin = () => !!me()?.admin;
 const prefs = () => (S.person ? store.prefs(S.person) : {});
 const mode = () => prefs().mode || 'suggestion';
+// The intro shows once per person. People who already finished the old tour have seen enough.
+const seenIntro = () => !!(prefs().introSeen || prefs().tourDone);
 
 // ---------- Boot ----------
 async function boot() {
@@ -57,12 +61,13 @@ async function boot() {
   render();
   bindGlobalEvents();
   if (!S.person) openProfilePicker();
-  else if (!prefs().tourDone) openTour();
+  else if (!seenIntro()) openIntro();
 }
 
 async function reloadInventory() {
   const inv = await loadInventory({ approved: approved(), excluded: excluded() });
   S.allFiles = inv.files; S.unapproved = inv.unapproved; S.dataSource = inv.source; S.realData = inv.real; S.dataMeta = inv.meta;
+  S.sugName = S.allFiles.some((f) => f.suggestion && !f.suggestion.placeholder) ? 'Claude' : 'suggestion';
   S.files = applyScope(S.allFiles, { scopeFolder: setting('scopeFolder'), scopeSubfolder: setting('scopeSubfolder'), scopeFirstN: setting('scopeFirstN') });
   S.fileById = Object.fromEntries(S.allFiles.map((f) => [f.id, f]));
   S.inventoryId = inv.inventoryId;
@@ -101,6 +106,7 @@ function available(source = S.source) {
   return queue(source).filter((f) => !store.claimedByOther(f.id, S.person, setting('claimIdleMinutes')));
 }
 function currentFile() {
+  if (S.practice) return S.practice.file; // practice never touches the real queue, claims or store
   const avail = available();
   let f = avail.find((x) => x.id === S.currentId);
   if (!f) {
@@ -161,6 +167,7 @@ function decide(folder) {
   if (!f || !S.person) return;
   if (folder !== 'Unsure' && !approved().includes(folder)) return;
   if (Date.now() - S.shownAt < MIN_LOOK_MS) return;
+  if (S.practice) { decidePractice(folder); return; } // nothing below this line runs for the practice file
   const seconds = Math.round((Date.now() - S.shownAt) / 100) / 10;
   const row = baseRow(f, folder, { seconds, markedUnsureBy: folder === 'Unsure' ? me().name : undefined });
   if (!store.saveDecisions([row]).ok) { showSaveError(); return; }
@@ -173,9 +180,61 @@ function decide(folder) {
   const next = available().find((x) => x.id !== f.id) || null;
   showFile(next);
   render();
+  announce(`Sorted to ${folder}. ${next ? `Next: ${next.name}.` : 'All done in this pile.'}`);
+}
+
+// ---------- Practice file ----------
+// A made-up file shown in the real sort screen. It lives only in S.practice (memory): decisions on it never reach
+// store.saveDecisions, keypad counts, claims, history or localStorage, and it is not in S.files, so counts, Review
+// and exports never see it.
+function practiceFile() {
+  const name = 'Practice - Roof Inspection 2021.pdf';
+  const pick = 'Bldg Information & Measurements';
+  const alts = ['Construction & Development', 'Property Management'].filter((f) => approved().includes(f));
+  return {
+    id: 'practice', name, type: 'pdf', size: 1.3e6, sample: true, practice: true,
+    copies: [{ path: `${PROPERTY.library}/Practice/${name}`, modified: '2021-06-15' }],
+    excludedCopies: 0, duplicateCheck: 'single copy', reportNote: '',
+    suggestion: { folder: pick, confidence: 'High', placeholder: true, alts, reason: 'Made-up example: a roof inspection report describes the building, so it goes here.' },
+  };
+}
+function startPractice() {
+  S.view = 'sort'; S.confirm = null; S.allFoldersOpen = false; S.folderFilter = '';
+  const file = practiceFile();
+  S.practice = { file, done: null, doneAt: 0 };
+  S.shownAt = Date.now();
+  previewer.preload([{ file, copy: file.copies[0] }]); // memory cache only: gives it the sample drawing
+  render();
+  announce("Practice file. This decision won't be saved.");
+}
+function decidePractice(folder) {
+  if (!S.practice || S.practice.done) return;
+  S.practice.done = folder; S.practice.doneAt = Date.now();
+  S.allFoldersOpen = false; S.folderFilter = '';
+  render();
+  announce(`Done. That would send it to ${folder === 'Unsure' ? 'the Unsure pile' : folder}. Real files start now.`);
+}
+/** Leave practice (Start sorting, Enter, Escape, or leaving the Sort screen) and go to the real queue. */
+function endPractice(quiet = false) {
+  if (!S.practice) return;
+  S.practice = null; S.allFoldersOpen = false; S.folderFilter = '';
+  const avail = available();
+  showFile(avail.find((x) => x.id === S.currentId) || avail[0] || null); // re-holds the real file; restarts the double-press guard
+  render();
+  if (!quiet) announce(S.currentId ? `Real files start now. ${S.fileById[S.currentId]?.name || ''}` : 'Real files start now.');
+}
+function practiceBanner() {
+  const p = S.practice;
+  if (!p) return '';
+  if (p.done) {
+    const where = p.done === 'Unsure' ? 'the Unsure pile' : p.done;
+    return `<div class="practice-banner done"><span>${I.check}</span><span><b>Done.</b> That would send it to ${esc(where)}. Real files start now.</span><button class="btn primary sm" data-act="practice-done">Start sorting <span class="kc sm wide">Enter</span></button></div>`;
+  }
+  return `<div class="practice-banner"><span><b>Practice file:</b> this decision won't be saved.</span><button class="btn sm" data-act="practice-done" title="Leave practice and start on real files (Esc)">Skip practice <span class="kc sm">Esc</span></button></div>`;
 }
 
 function undo() {
+  if (S.practice) { toast("Practice only: nothing was saved, so there is nothing to undo."); return; }
   if (!S.person) return;
   const res = store.undoLast(S.person);
   if (res?.error) { showSaveError(); return; }
@@ -200,6 +259,7 @@ function undo() {
     : onScreen ? `Undid: ${name} is back on screen.` : `Undid: ${name} is unsorted again (it's outside the current test scope).` };
   if (res.blocked.length) S.confirm.text += ` ${res.blocked.length} file${res.blocked.length > 1 ? 's were' : ' was'} left alone because someone changed them in Review.`;
   render();
+  announce(res.restored.length > 1 ? `Undone: ${res.restored.length} files.` : `Undone: ${name}.`);
 }
 
 // ---------- Keypad ----------
@@ -219,6 +279,14 @@ function render() {
   app.innerHTML = topbar() + toolbar() + `<main>${S.view === 'sort' ? sortView(f) : S.view === 'review' ? reviewView() : issuesView()}</main>` + statusbar();
   if (S.allFoldersOpen) { const inp = $('#folder-filter'); inp?.focus(); inp && (inp.value = S.folderFilter); }
   renderStatus();
+  syncExpanded();
+}
+
+/** Redraw in place: an edit in Review must not throw the person back to the top of the page. */
+function renderKeepScroll() {
+  const y = window.scrollY;
+  render();
+  window.scrollTo(0, y);
 }
 
 function topbar() {
@@ -241,11 +309,11 @@ function topbar() {
     <div class="top-right">
       <div class="progress" title="${copiesDone} of ${copiesTotal} copies resolved · ${unsure} Unsure">
         <div class="bar"><i style="width:${pct}%"></i></div>
-        <div><b>${sorted.length} / ${scoped.length}</b> files<div class="small">${copiesDone}/${copiesTotal} copies · ${unsure} unsure</div></div>
+        <div><b title="Files sorted in this test scope">${sorted.length} / ${scoped.length} files</b><div class="small">${copiesDone}/${copiesTotal} copies · ${unsure} unsure</div></div>
       </div>
-      <button class="icon-btn" data-act="help-menu" aria-label="Help, tour, rules and settings" title="Help">?</button>
+      <button class="icon-btn" data-act="help-menu" aria-label="Help, intro, tour, rules and settings" aria-haspopup="menu" aria-expanded="false" title="Help">?</button>
       <button class="icon-btn" data-act="theme" aria-label="Switch light or dark" title="${theme === 'dark' ? 'Light mode' : 'Dark mode'}">${theme === 'dark' ? I.sun : I.moon}</button>
-      <button class="profile-btn" data-act="profile-menu" data-tour="profile" aria-haspopup="menu">
+      <button class="profile-btn" data-act="profile-menu" data-tour="profile" aria-haspopup="menu" aria-expanded="false">
         ${p ? avatar(p) : '<span class="avatar" style="background:#4B5966">?</span>'}
         <span><div class="lbl">Sorting as</div><div class="nm">${p ? esc(p.name) : 'Choose'}</div></span>
         <span style="width:16px;opacity:.7">${I.chevron}</span>
@@ -280,32 +348,46 @@ function isOn(group, val) {
   return false;
 }
 
+/** 'Claude' only when real Claude suggestions exist; placeholder suggestions are called 'suggestion'. Worked out once per inventory load. */
+const sugName = () => S.sugName || 'suggestion';
+const scopeLabel = () => (setting('scopeFolder') ? `${setting('scopeFolder')}${setting('scopeSubfolder') ? ' › ' + setting('scopeSubfolder') : ''}` : 'All folders');
+const fmtDay = (iso) => { const d = new Date(String(iso).length === 10 ? iso + 'T12:00:00' : iso); return isNaN(d) ? String(iso || '') : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); };
+
+/** Slim bar at the top of the Sort view: what is being sorted, which data, and where decisions are saved. */
+function contextBar() {
+  const label = esc(scopeLabel());
+  const scope = isAdmin() ? `<button class="linkish" data-act="settings" title="Change the test scope"><b>${label}</b></button>` : `<b>${label}</b>`;
+  const data = S.realData ? `Real data · report ${esc(fmtDay(S.dataMeta?.reportDate))}` : 'Sample data (made up)';
+  return `<div class="context-bar">
+    <span class="cb-scope">Sorting ${scope} · ${queue('remaining').length} of ${S.files.length} files left</span>
+    <span class="cb-chip" title="${esc(S.dataSource || '')}">${data}</span>
+    <span class="save-ind cb-save" data-ok="Saved in this browser"><i></i><span>Saved in this browser</span></span>
+  </div>`;
+}
+
 function statusbar() {
   const kc = (k, w) => `<span class="kc sm ${w ? 'wide' : ''}">${k}</span>`;
   const keys = mode() === 'keypad'
-    ? `<span>${kc('1')}–${kc('9')} folder</span><span>${kc('Enter', 1)} Claude's pick</span>`
+    ? `<span>${kc('1')}–${kc('9')} folder</span><span>${kc('Enter', 1)} ${sugName() === 'Claude' ? "Claude's pick" : 'suggested pick'}</span>`
     : `<span>${kc('Enter', 1)} accept</span><span>${kc('1')} ${kc('2')} alternatives</span>`;
-  const scopeLabel = setting('scopeFolder') ? `${setting('scopeFolder')}${setting('scopeSubfolder') ? ' › ' + setting('scopeSubfolder') : ''}` : 'All folders';
   return `<footer class="statusbar">
     <div class="keys">${S.view === 'sort' ? `${keys}<span>${kc('/')} all folders</span><span>${kc('.')} unsure</span><span>${kc('0')} undo</span><span>${kc('N')} note</span>` : (S.view === 'review' ? '<span>Review: changes here update the plan and the decisions spreadsheet.</span>' : '<span>Issues are saved in this browser. Export and email them to TW.</span>')}</div>
     <div class="right">
-      <a href="#" data-act="settings" title="Test scope: only these files are in the beta${isAdmin() ? '. Click to change.' : ''}">Scope: ${esc(scopeLabel)} · first ${setting('scopeFirstN')}</a>
-      <span title="${esc(S.dataSource)}">${S.realData ? `Real data · report ${esc(S.dataMeta.reportDate)}` : 'Sample data'}</span>
       <span class="testline">Test mode · Nothing on SharePoint is changed.</span>
-      <span class="save-ind" id="save-ind"><i></i><span>Saved</span></span>
+      <span class="save-ind" id="save-ind" data-ok="Saved"><i></i><span>Saved</span></span>
       <a href="#" data-act="about">v${esc(S.pkg.version)} · Test mode</a>
     </div>
   </footer>`;
 }
 
 function renderStatus() {
-  const el = $('#save-ind');
-  if (el) {
+  document.querySelectorAll('.save-ind').forEach((el) => {
     const st = store.status;
-    el.className = 'save-ind ' + st;
-    el.querySelector('span').textContent = st === 'error' ? 'Not saved' : 'Saved';
+    el.classList.remove('saving', 'offline', 'error', 'ok', 'saved');
+    if (st) el.classList.add(st);
+    el.querySelector('span').textContent = st === 'error' ? 'Not saved' : el.dataset.ok || 'Saved';
     el.title = st === 'error' ? store.error : `Every decision is saved immediately (${store.label}).`;
-  }
+  });
   const k = $('#kbd-ind');
   if (k) {
     const a = document.activeElement;
@@ -320,10 +402,10 @@ function renderStatus() {
 
 // ---------- Sort view ----------
 function sortView(f) {
-  if (!S.person) return `<div class="card empty"><h2>Choose your profile to start</h2><p class="muted">Every decision is saved under your name.</p><button class="btn primary" data-act="profile-menu">Choose profile</button></div>`;
+  if (!S.person) return `<div class="card empty"><h2>Choose your profile to start</h2><p class="muted">Every decision is saved under your initials.</p><button class="btn primary" data-act="profile-menu">Choose profile</button></div>`;
   if (!f) {
     const otherClaims = queue().length - available().length;
-    return `<div class="sort-grid"><div class="card empty">
+    return `<div class="sort-grid">${contextBar()}<div class="card empty">
       <div style="font-size:40px">${S.source === 'unsure' ? '🗂️' : '🎉'}</div>
       <h2>${S.source === 'unsure' ? 'The Unsure pile is empty' : 'Nothing left to sort in this scope'}</h2>
       <p class="muted">${otherClaims ? `${otherClaims} file(s) are open with someone else right now.` : S.source === 'remaining' && queue('unsure').length ? `${queue('unsure').length} file(s) are waiting in Unsure.` : 'Check the Review tab to see what the cleanup would do.'}</p>
@@ -331,7 +413,8 @@ function sortView(f) {
     </div><div class="col">${whoCard()}${statsCard()}</div></div>`;
   }
   return `<div class="sort-grid">
-    <div class="col">${fileCard(f)}${copiesCard(f)}</div>
+    ${contextBar()}
+    <div class="col">${practiceBanner()}${fileCard(f)}${copiesCard(f)}</div>
     <div class="col">${mode() === 'keypad' ? keypadPanel(f) : suggestionPanel(f)}${whoCard()}${statsCard()}</div>
   </div>`;
 }
@@ -342,19 +425,19 @@ function fileCard(f) {
   const notes = store.notes(f.id);
   const hints = [];
   if (S.source === 'unsure' && d) hints.push(`<span class="hint warn">Marked Unsure by ${esc(d.decidedByName)} · ${fmtDateTime(d.decidedAt)}</span>`);
-  if (f.similar?.length) hints.push(`<span class="hint info">Similar files exist (different content): ${f.similar.map((s) => `<button data-act="jump" data-id="${s.id}" title="${esc(s.differences || '')}">${esc(s.name)}</button>`).join(', ')}${f.similar[0].differences ? ` · ${esc(f.similar[0].differences)}` : ''}</span>`);
+  if (f.similar?.length && !f.practice) hints.push(`<span class="hint info">Similar files exist (different content): ${f.similar.map((s) => `<button data-act="jump" data-id="${s.id}" title="${esc(s.differences || '')}">${esc(s.name)}</button>`).join(', ')}${f.similar[0].differences ? ` · ${esc(f.similar[0].differences)}` : ''}</span>`);
   if (f.twin) hints.push(`<span class="hint warn" title="Same name and size, different content hash. Never held automatically.">Possible duplicate: review · ${esc(folderCrumb(f.twin.path))} (${esc(f.twin.tier)})</span>`);
   if (f.newSinceReport) hints.push('<span class="hint info">New since report</span>');
   const unapprovedTops = [...new Set(f.copies.map((c) => topFolder(c.path)).filter((t) => !approved().includes(t)))];
-  if (unapprovedTops.length) hints.push(`<span class="hint">In a folder that isn't a sorting choice: ${unapprovedTops.map(esc).join(', ')}</span>`);
+  if (unapprovedTops.length && !f.practice) hints.push(`<span class="hint">In a folder that isn't a sorting choice: ${unapprovedTops.map(esc).join(', ')}</span>`);
   if (f.reportNote) hints.push(`<span class="hint">Report note: ${esc(f.reportNote)}</span>`);
   return `<section class="card" data-tour="file">
     <div class="file-head">
       <span class="ftype" style="background:${typeColor(f.type)}">${esc(f.type.toUpperCase())}</span>
       <div style="min-width:0"><h1>${esc(f.name)}</h1>
-      <div class="meta">${fmtSize(f.size)} · ${f.copies.length} ${f.copies.length === 1 ? 'copy' : 'copies'} · ${S.source === 'unsure' ? 'Unsure' : 'Remaining'} · ${q.length} left</div></div>
-      <div class="actions"><button class="btn sm" data-act="note" title="Add a note (N)">${I.note} Note <span class="kc sm">N</span></button>
-      <button class="btn sm" data-act="folder-decision" title="Send every unsorted file in a folder to one top-level folder">${I.stack} Sort this whole folder</button></div>
+      <div class="meta">${fmtSize(f.size)} · ${f.copies.length} ${f.copies.length === 1 ? 'copy' : 'copies'} · ${f.practice ? 'Practice' : `${S.source === 'unsure' ? 'Unsure' : 'Remaining'} · ${q.length} left`}</div></div>
+      ${f.practice ? '' : `<div class="actions"><button class="btn sm" data-act="note" title="Add a note (N)">${I.note} Note <span class="kc sm">N</span></button>
+      <button class="btn sm" data-act="folder-decision" title="Send every unsorted file in a folder to one top-level folder">${I.stack} Sort this whole folder</button></div>`}
     </div>
     ${hints.length ? `<div class="hints">${hints.join('')}</div>` : ''}
     ${previewBox(f)}
@@ -371,6 +454,17 @@ function previewTag(f) {
 
 function previewBox(f) {
   const kept = keptCopy(f, f.suggestion?.folder || null, S.manualKept[f.id]).copy;
+  const e = previewer.get(f.id);
+  // No thumbnail to show (or still loading) for a real file: a compact row instead of the big empty box.
+  if (!f.sample && (!e || e.state === 'loading' || e.state === 'none')) {
+    const type = (f.type || 'file').toUpperCase();
+    const why = !e || e.state === 'loading' ? 'Loading preview…' : e.reason === 'large' ? 'Too large to preview' : 'No preview here';
+    const help = e?.state === 'none' && e.reason === 'unavailable' ? ' <a href="#" class="pr-help" data-act="thumb-help">How to fix</a>' : '';
+    const btn = kept?.url
+      ? `<a class="btn sm" href="${esc(kept.url)}" target="_blank" rel="noopener" title="Opens the kept copy in SharePoint in a new tab">Open preview ↗</a>`
+      : '<a class="btn sm" aria-disabled="true" title="There is no real file to open">Open preview ↗</a>';
+    return `<div class="preview-row" id="preview"><span class="ftype" style="background:${typeColor(f.type)}">${esc(type)}</span><span class="pr-text"><b>${esc(type)} · ${fmtSize(f.size)}</b> <span class="muted">· ${why}</span>${help}</span>${btn}</div>`;
+  }
   const open = kept.url
     ? `<a class="open" href="${esc(kept.url)}" target="_blank" rel="noopener" title="Opens the kept copy in SharePoint in a new tab">Open full file ↗</a>`
     : '<a class="open" aria-disabled="true" title="Sample data: there is no real file to open">Open full file ↗</a>';
@@ -419,7 +513,7 @@ function copiesCard(f) {
   const { copy: kept, manual } = keptCopy(f, target, S.manualKept[f.id]);
   const n = f.copies.length;
   const head = n > 1
-    ? `<h2>${n} copies found · one decision covers all of them</h2><p>One copy is kept and moved to the folder you choose. The other ${n - 1} go${n - 1 === 1 ? 'es' : ''} to Duplicate Hold (not deleted), with a shortcut left behind. The kept copy is picked automatically: change it only if you know another copy is the right version.</p>`
+    ? `<h2>${n} copies found · one decision covers all of them</h2><p>One copy is kept and moved to the folder you choose. The other ${n - 1} go${n - 1 === 1 ? 'es' : ''} to Duplicate Hold (not deleted), with a shortcut left behind. The kept copy is picked automatically: change it only if you know another copy is the right version.</p>${new Set(f.copies.map((c) => topFolder(c.path))).size > 1 ? `<p class="muted small">Kept copy shown for the suggested folder${target ? ` (${esc(target)})` : ''}. If you choose a different folder, a copy already in that folder is kept instead.</p>` : ''}`
     : `<h2>1 copy · no duplicates</h2><p>This file only exists in one place.</p>`;
   const rows = f.copies.map((c) => {
     const isKept = c === kept;
@@ -442,7 +536,7 @@ function suggestionPanel(f) {
   const s = f.suggestion;
   const alts = s?.alts || [];
   return `<section class="card" data-tour="decision">
-    <div class="panel-head"><h2>Decision</h2>${s ? `<span class="conf ${s.confidence}">${s.confidence} confidence</span>` : ''}</div>
+    <div class="panel-head"><h2 tabindex="-1">Decision</h2>${s ? `<span class="conf ${s.confidence}">${s.confidence} confidence</span>` : ''}</div>
     <div class="panel-body">
       <div class="panel-hint">${I.keyboard}<span>Click a button, or press the key shown on it.</span></div>
       ${s ? `<button class="suggest" data-act="pick" data-folder="${esc(s.folder)}"><div><div class="eyebrow">${s.placeholder ? 'Placeholder suggestion' : 'Claude suggests'}</div><div class="folder">${esc(s.folder)}</div></div><span class="kc wide">Enter</span></button>
@@ -457,8 +551,8 @@ function suggestionPanel(f) {
 
 function commonButtons() {
   return `<div data-tour="unsure-undo" style="display:flex;flex-direction:column;gap:10px">
-    <div class="row2"><button class="choice allf ${S.allFoldersOpen ? 'active' : ''}" data-act="all-folders"><span class="kc">/</span>All folders</button>
-    <button class="choice unsure" data-act="pick" data-folder="Unsure" ${S.source === 'unsure' ? 'disabled title="Already in the Unsure pile"' : ''}><span class="kc">.</span>Unsure</button></div>
+    <div class="row2"><button class="choice allf ${S.allFoldersOpen ? 'active' : ''}" data-act="all-folders" aria-expanded="${S.allFoldersOpen}"><span class="kc">/</span>All folders</button>
+    <button class="choice unsure" data-act="pick" data-folder="Unsure" ${S.source === 'unsure' && !S.practice ? 'disabled title="Already in the Unsure pile"' : ''}><span class="kc">.</span>Unsure</button></div>
     <button class="choice undo" data-act="undo">${I.undo} Undo last decision <span class="kc">0</span></button>
   </div>`;
 }
@@ -487,7 +581,7 @@ function keypadPanel(f) {
   const order = [7, 8, 9, 4, 5, 6, 1, 2, 3];
   const anySpare = Object.values(keys).some((k) => k.spare);
   return `<section class="card" data-tour="decision">
-    <div class="panel-head"><h2>Keypad</h2>${f.suggestion ? `<span class="conf ${f.suggestion.confidence}">${f.suggestion.confidence} confidence</span>` : ''}</div>
+    <div class="panel-head"><h2 tabindex="-1">Keypad</h2>${f.suggestion ? `<span class="conf ${f.suggestion.confidence}">${f.suggestion.confidence} confidence</span>` : ''}</div>
     <div class="panel-body">
       <div class="panel-hint">${I.keyboard}<span>Click a folder, or press its number (number row or number pad).</span></div>
       ${learn}
@@ -545,17 +639,38 @@ function statsCard() {
 }
 
 // ---------- Review view ----------
-/** The plan for the current scope, worked out once per render: actions, totals, conflicts, approval state. */
+const PAGE_SIZE = 50;          // decision cards per page
+const SEARCH_DEBOUNCE_MS = 200;
+const TREE_MATCH_CAP = 300;    // most matching files drawn per tree while searching
+const fmtN = (n) => Number(n).toLocaleString('en-US');
+
+/**
+ * The plan for the current scope: actions, totals, conflicts, approval state, plus the lists Review draws from.
+ * Cached: it is only worked out again when the saved data (store revision), the inventory, the scope or the
+ * settings change. Every Review redraw, export and approval reads the same object.
+ */
+let planCache = null;
 function planState() {
+  const db = store.db, maxLen = setting('maxPathLength');
+  const c = planCache;
+  if (c && c.db === db && c.rev === db.rev && c.files === S.files && c.allFiles === S.allFiles && c.inv === S.inventoryId && c.maxLen === maxLen) return c.P;
+  const P = computePlan(maxLen);
+  planCache = { db, rev: db.rev, files: S.files, allFiles: S.allFiles, inv: S.inventoryId, maxLen, P };
+  return P;
+}
+
+function computePlan(maxLen) {
   const dec = decisionsById();
+  const all = Object.values(dec);
   const inScope = new Set(S.files.map((f) => f.id));
-  const decisions = Object.values(dec).filter((d) => inScope.has(d.fileId));
-  const orphans = Object.values(dec).filter((d) => !S.fileById[d.fileId]); // decisions whose file isn't in this inventory
-  const actions = buildPlan(S.files, decisions);
-  const sum = planSummary(S.files, decisions);
+  const decisions = all.filter((d) => inScope.has(d.fileId));
+  const orphans = all.filter((d) => !S.fileById[d.fileId]); // decisions whose file isn't in this inventory
+  const plans = planByFile(S.allFiles, all);                 // each decision planned once, shared below
+  const actions = buildPlan(S.files, decisions, plans);
+  const sum = planSummary(S.files, decisions, plans);
   // Site part of the path counts toward SharePoint's limit. Sample data has no site, so assume a typical length.
   const sitePath = S.dataMeta?.siteBase ? new URL(S.dataMeta.siteBase).pathname : 'x'.repeat(21);
-  const issues = conflictChecks(S.allFiles, [...decisions, ...orphans], { maxPathLength: setting('maxPathLength'), sitePath, allDecisionsById: dec });
+  const issues = conflictChecks(S.allFiles, [...decisions, ...orphans], { maxPathLength: maxLen, sitePath, allDecisionsById: dec, plans });
   const fingerprint = planFingerprint(actions);
   const approval = store.approvals().filter((a) => a.fingerprint === fingerprint && a.inventoryId === S.inventoryId).at(-1) || null;
   const lastApproval = store.approvals().at(-1) || null;
@@ -566,18 +681,40 @@ function planState() {
     { ok: issues.length === 0, text: issues.length ? `${issues.length} conflict${issues.length === 1 ? '' : 's'} to resolve` : 'No conflicts (checked against the whole library)' },
     { ok: null, text: 'Live SharePoint re-check: arrives with sign-in (phase 3)' },
   ];
-  return { decisions, actions, sum, issues, fingerprint, approval, lastApproval, gates, canApprove: gates.every((g) => g.ok !== false) };
+  // Lists for the Changes tab, worked out once per plan rather than once per redraw.
+  const issueBy = new Map();
+  for (const i of issues) { if (!issueBy.has(i.fileId)) issueBy.set(i.fileId, []); issueBy.get(i.fileId).push(i); }
+  const sorted = [...decisions].sort((a, b) => b.decidedAt.localeCompare(a.decidedAt));
+  const folderCounts = {};
+  for (const d of decisions) folderCounts[d.folder] = (folderCounts[d.folder] || 0) + 1;
+  const orphanEntries = orphans.map((d) => ({ orphan: true, fileId: d.fileId, fileName: d.fileName }));
+  const P = { decisions, actions, sum, issues, fingerprint, approval, lastApproval, gates, canApprove: gates.every((g) => g.ok !== false),
+    issueBy, sorted, folderCounts, orphanEntries,
+    queues: { toreview: unreviewed, conflicts: issueBy.size, reviewed: decisions.length - unreviewed, all: decisions.length },
+    finished: decisions.length > 0 && unreviewed === 0 && issues.length === 0 };
+  let trees = null;
+  Object.defineProperty(P, 'trees', { get: () => trees || (trees = computeTrees(dec)) }); // only the Folder tree tab needs these
+  return P;
+}
+
+function computeTrees(dec) {
+  const t = buildTrees(S.files, dec);
+  const changedTops = new Set();
+  for (const d of Object.values(dec)) { const f = S.fileById[d.fileId]; if (!f || d.folder === 'Unsure') continue; changedTops.add(d.folder); f.copies.forEach((c) => changedTops.add(topFolder(c.path))); }
+  return { t, unchanged: approved().filter((f) => !changedTops.has(f)).length };
 }
 
 function reviewView() {
+  flushPendingSearch(); // a half-debounced search box is applied before the page is redrawn
   const P = planState();
   S.plan = P;
-  const { decisions, sum, issues } = P;
+  const { sum, issues } = P;
   const R = S.review;
   const reviewer = !!me()?.reviewer;
   const status = P.approval
     ? `<b class="ok-text">Approved</b> by ${esc(P.approval.byName)} · ${fmtDateTime(P.approval.at)} · this exact plan`
     : P.lastApproval ? '<b class="warn-text">Draft</b> · the plan changed since the last approval, so it needs approving again' : '<b class="warn-text">Draft</b> · not approved yet';
+  const queues = [['toreview', 'To review'], ['conflicts', 'Conflicts'], ['reviewed', 'Reviewed'], ['all', 'All']];
   return `<div class="review">
     <div class="review-head"><div><h1>Review simulated changes</h1><p>What the cleanup would do with the decisions so far. Test mode: nothing is actually moved or changed.</p></div></div>
     <div class="card approval">
@@ -589,6 +726,8 @@ function reviewView() {
           : `<button class="btn primary" data-act="approve-plan" ${reviewer && P.canApprove ? '' : 'disabled'} title="${reviewer ? (P.canApprove ? 'Approve exactly this plan' : 'Every check above must pass first') : 'Only TW or KB can approve'}">${I.check} Approve plan</button>`}
       </div>
     </div>
+    ${P.finished ? `<section class="card finished" aria-label="Finished reviewing">${I.check}<div><b>Everything is reviewed.</b> ${P.approval ? 'This exact plan is approved. Next: export the approved plan.' : 'Next: TW or KB approves the plan.'}</div>
+      <button class="btn" data-act="goto-approval">${P.approval ? 'Show the export step' : 'Show the approval step'}</button></section>` : ''}
     <div class="sum-cards">
       <div class="card"><b>${sum.sorted}</b><span>Files sorted</span></div>
       <div class="card"><b>${sum.move}</b><span>Files that would move</span></div>
@@ -600,43 +739,82 @@ function reviewView() {
     ${issues.length ? `<div class="card"><div class="panel-head"><h2>Conflict checks · ${issues.length}</h2><span class="muted small">Checked against the whole library, not just the test scope</span></div>${issues.slice(0, 50).map((i) => `<div class="issue"><b>${esc(i.kind)}</b> ${esc(S.fileById[i.fileId]?.name || i.fileName || i.fileId)}: ${esc(i.detail)}</div>`).join('')}${issues.length > 50 ? `<div class="issue">…and ${issues.length - 50} more (all are in the draft export)</div>` : ''}</div>` : ''}
     <div class="review-tools">
       <div class="seg">${[['changes', 'Changes by file'], ['tree', 'Folder tree: before → after']].map(([v, l]) => `<button data-act="review-tab" data-val="${v}" aria-pressed="${R.tab === v}">${l}</button>`).join('')}</div>
-      ${R.tab === 'changes' ? `<div class="filters">
+      ${R.tab === 'changes' ? `<div class="seg" role="group" aria-label="Queue">${queues.map(([v, l]) => `<button data-act="rv-queue" data-val="${v}" aria-pressed="${R.queue === v}">${l} (${fmtN(P.queues[v])})</button>`).join('')}</div>
+      <input type="search" class="rv-search" data-act-input="rv-q" placeholder="Search file name or path" aria-label="Search decisions by file name or path" value="${esc(R.search)}" autocomplete="off">
+      <div class="filters">
         <select data-act-change="rf-person" aria-label="Filter by person"><option value="">Everyone</option>${PEOPLE.map((p) => `<option value="${p.id}" ${R.person === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
         <select data-act-change="rf-type" aria-label="Filter by decision type"><option value="">Single + folder decisions</option><option value="single file" ${R.type === 'single file' ? 'selected' : ''}>Single files</option><option value="folder decision" ${R.type === 'folder decision' ? 'selected' : ''}>Folder decisions</option></select>
         <label class="chk"><input type="checkbox" data-act-change="rf-changed" ${R.changed ? 'checked' : ''}> Changed from suggestion</label>
-        <label class="chk"><input type="checkbox" data-act-change="rf-unreviewed" ${R.unreviewed ? 'checked' : ''}> Not yet reviewed</label>
       </div>` : ''}
     </div>
-    ${R.tab === 'changes' ? changesByFile(decisions, issues) : folderTrees()}
+    ${R.tab === 'changes' ? changesByFile(P) : folderTrees(P)}
   </div>`;
 }
 
-function changesByFile(decisions, issues) {
+// ---------- Review: the decision list (queues, search, paging) ----------
+const searchText = new WeakMap(); // file -> lower-case name and every copy's path, built once per file
+function haystack(f) {
+  let h = searchText.get(f);
+  if (h === undefined) { h = `${f.name}\n${f.copies.map((c) => c.path).join('\n')}`.toLowerCase(); searchText.set(f, h); }
+  return h;
+}
+
+/** The entries (decisions, plus orphans in the Conflicts queue) that match the queue, filters and search box. */
+function reviewList(P) {
   const R = S.review;
-  const counts = {};
-  for (const d of decisions) counts[d.folder] = (counts[d.folder] || 0) + 1;
-  const folders = approved().filter((f) => counts[f]);
-  const empty = approved().length - folders.length;
-  let list = decisions.filter((d) => R.folder === 'all' || d.folder === R.folder);
+  let list = P.sorted;
+  if (R.queue === 'toreview') list = list.filter((d) => !d.reviewedBy);
+  else if (R.queue === 'reviewed') list = list.filter((d) => d.reviewedBy);
+  else if (R.queue === 'conflicts') list = list.filter((d) => P.issueBy.has(d.fileId));
+  if (R.folder !== 'all') list = list.filter((d) => d.folder === R.folder);
   if (R.person) list = list.filter((d) => d.decidedBy === R.person);
   if (R.type) list = list.filter((d) => d.decisionType === R.type);
   if (R.changed) list = list.filter((d) => d.folder !== 'Unsure' && !d.accepted);
-  if (R.unreviewed) list = list.filter((d) => !d.reviewedBy);
-  list.sort((a, b) => b.decidedAt.localeCompare(a.decidedAt));
-  const title = R.folder === 'all' ? 'All decisions' : R.folder;
-  const issueBy = {};
-  issues.forEach((i) => (issueBy[i.fileId] ||= []).push(i));
+  const words = R.search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length) list = list.filter((d) => { const f = S.fileById[d.fileId]; const h = f ? haystack(f) : ''; return words.every((w) => h.includes(w)); });
+  // Conflicts about decisions whose file is no longer in the inventory have no card of their own; list them here.
+  if (R.queue === 'conflicts' && R.folder === 'all' && !R.person && !R.type && !R.changed) {
+    const extra = P.orphanEntries.filter((o) => !words.length || words.every((w) => String(o.fileName || o.fileId).toLowerCase().includes(w)));
+    if (extra.length) list = [...list, ...extra];
+  }
+  return list;
+}
+
+function changesByFile(P) {
+  const R = S.review;
+  const folders = approved().filter((f) => P.folderCounts[f]);
+  const empty = approved().length - folders.length;
   return `<div class="review-grid">
     <div class="card dest-list"><div class="lh">Destination folders</div>
-      <button class="${R.folder === 'all' ? 'sel' : ''}" data-act="rf-folder" data-val="all">All decisions <span class="count">${decisions.length}</span></button>
-      ${folders.map((f) => `<button class="${R.folder === f ? 'sel' : ''}" data-act="rf-folder" data-val="${esc(f)}">${esc(f)} <span class="count">${counts[f]}</span></button>`).join('')}
-      <button class="unsure ${R.folder === 'Unsure' ? 'sel' : ''}" data-act="rf-folder" data-val="Unsure">Unsure <span class="count">${counts.Unsure || 0}</span></button>
+      <button class="${R.folder === 'all' ? 'sel' : ''}" data-act="rf-folder" data-val="all">All decisions <span class="count">${P.decisions.length}</span></button>
+      ${folders.map((f) => `<button class="${R.folder === f ? 'sel' : ''}" data-act="rf-folder" data-val="${esc(f)}">${esc(f)} <span class="count">${P.folderCounts[f]}</span></button>`).join('')}
+      <button class="unsure ${R.folder === 'Unsure' ? 'sel' : ''}" data-act="rf-folder" data-val="Unsure">Unsure <span class="count">${P.folderCounts.Unsure || 0}</span></button>
       <div class="foot">${empty} of ${approved().length} folders receive nothing yet</div>
     </div>
-    <div><div class="list-head"><h2>${esc(title)}</h2><span class="muted">${list.length} file${list.length === 1 ? '' : 's'}</span></div>
-      ${list.length ? list.map((d) => decisionCard(d, issueBy[d.fileId])).join('') : '<div class="card empty"><p class="muted">No decisions match.</p></div>'}
-    </div>
+    <div id="rv-results">${reviewResults(P)}</div>
   </div>`;
+}
+
+/** The heading, pager and (at most PAGE_SIZE) cards. Redrawn on its own while typing in the search box or changing page. */
+function reviewResults(P) {
+  const R = S.review;
+  const list = reviewList(P);
+  const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  R.page = Math.min(Math.max(1, R.page), pages); // editing a card keeps the page; it only moves if the list got shorter
+  const from = (R.page - 1) * PAGE_SIZE, to = Math.min(list.length, from + PAGE_SIZE);
+  const title = R.folder === 'all' ? 'All decisions' : R.folder;
+  const pager = list.length > PAGE_SIZE ? `<nav class="pager" aria-label="Pages of decisions"><span class="pg-info">Showing ${fmtN(from + 1)}–${fmtN(to)} of ${fmtN(list.length)}</span>
+      <span class="pg-btns"><button class="btn" data-act="rv-page" data-val="prev" ${R.page <= 1 ? 'disabled' : ''}>Previous</button><button class="btn" data-act="rv-page" data-val="next" ${R.page >= pages ? 'disabled' : ''}>Next</button></span></nav>` : '';
+  const none = R.queue === 'toreview' && P.queues.toreview === 0 ? 'Nothing is left to review.' : 'No decisions match.';
+  return `<div class="list-head"><h2>${esc(title)}</h2><span class="muted">${fmtN(list.length)} file${list.length === 1 ? '' : 's'}</span></div>
+    ${pager}
+    ${list.length ? list.slice(from, to).map((d) => (d.orphan ? orphanCard(d, P.issueBy.get(d.fileId)) : decisionCard(d, P.issueBy.get(d.fileId)))).join('') : `<div class="card empty"><p class="muted">${none}</p></div>`}
+    ${list.length > 8 ? pager : ''}`;
+}
+
+function orphanCard(o, issues = []) {
+  return `<article class="card dcard"><div class="dh"><div><div class="t">${esc(o.fileName || o.fileId)}</div><div class="s">Not in the current inventory</div></div></div>
+    ${issues.map((i) => `<div class="issue"><b>${esc(i.kind)}</b> ${esc(i.detail)}</div>`).join('')}</article>`;
 }
 
 function decisionCard(d, issues = []) {
@@ -664,71 +842,153 @@ function decisionCard(d, issues = []) {
   </article>`;
 }
 
-function folderTrees() {
-  const dec = decisionsById();
-  const t = buildTrees(S.files, dec);
-  const q = S.review.query.trim().toLowerCase();
+// ---------- Review: folder trees ----------
+const treeTotals = new WeakMap(); // tree node -> files under it (the trees are rebuilt only when the plan changes)
+const totalOf = (n) => { let t = treeTotals.get(n); if (t === undefined) { t = countFiles(n); treeTotals.set(n, t); } return t; };
+const lcName = (fl) => fl.lc ?? (fl.lc = fl.name.toLowerCase());
+
+/**
+ * One tree (before or after) as HTML: the top folders under `root`, then any `extras` ([node, key]) after them.
+ * While searching, only folders on the way to a match are drawn, and at most TREE_MATCH_CAP files.
+ * Returns { html, matches, shown } (matches and shown are 0 when not searching).
+ */
+function treeHtml(root, prefix, q, extras = []) {
+  const hits = new Map(); // node -> matching files in its subtree
+  if (q) {
+    const walk = (n) => { let c = 0; for (const f of n.files) if (lcName(f).includes(q)) c++; for (const k of n.children.values()) c += walk(k); hits.set(n, c); return c; };
+    for (const k of root.children.values()) walk(k);
+    for (const [n] of extras) walk(n);
+  }
+  const budget = { left: TREE_MATCH_CAP };
   const node = (n, key, depth) => {
-    const total = countFiles(n);
-    const matchesQ = (x) => !q || x.name.toLowerCase().includes(q);
-    const files = n.files.filter(matchesQ);
+    if (q && (!hits.get(n) || budget.left <= 0)) return '';
+    const total = totalOf(n);
     const kids = [...n.children.values()].sort((a, b) => a.name.localeCompare(b.name));
-    if (q && !files.length && !kids.some((k) => hasMatch(k, q))) return '';
     const isOpen = q ? true : S.review.open.has(key) ? true : depth === 0 && !S.review.open.has('x:' + key);
     const pad = `style="padding-left:${18 + depth * 18}px"`;
-    return `<div class="tnode"><div class="trow" data-act="tree-toggle" data-key="${esc(key)}" data-depth="${depth}" ${pad}><span class="tw">${isOpen ? '▼' : '▶'}</span>${I.folder}${esc(n.name)}<span class="count">${total}</span></div>
-      ${isOpen ? kids.map((k) => node(k, key + '/' + k.name, depth + 1)).join('') + files.map((fl) => `<div class="tfile" style="padding-left:${36 + depth * 18}px">${I.file}${esc(fl.name)}${fl.tag ? `<span class="ttag ${fl.tag.tone}">${esc(fl.tag.label)}</span>` : ''}</div>`).join('') : ''}</div>`;
+    let inner = '';
+    if (isOpen) {
+      inner = kids.map((k) => node(k, key + '/' + k.name, depth + 1)).join('');
+      for (const fl of n.files) {
+        if (q) { if (!lcName(fl).includes(q) || budget.left <= 0) continue; budget.left--; }
+        inner += `<div class="tfile" style="padding-left:${36 + depth * 18}px">${I.file}${esc(fl.name)}${fl.tag ? `<span class="ttag ${fl.tag.tone}">${esc(fl.tag.label)}</span>` : ''}</div>`;
+      }
+    }
+    return `<div class="tnode"><div class="trow" role="button" tabindex="0" aria-expanded="${isOpen}" aria-label="${esc(n.name)}, ${total} file${total === 1 ? '' : 's'}" data-act="tree-toggle" data-key="${esc(key)}" data-depth="${depth}" ${pad}><span class="tw" aria-hidden="true">${isOpen ? '▼' : '▶'}</span>${I.folder}${esc(n.name)}<span class="count">${total}</span></div>${inner}</div>`;
   };
-  const tops = (root, prefix) => [...root.children.values()].sort((a, b) => a.name.localeCompare(b.name)).map((k) => node(k, prefix + k.name, 0)).join('');
-  const changedTops = new Set();
-  for (const d of Object.values(dec)) { const f = S.fileById[d.fileId]; if (!f || d.folder === 'Unsure') continue; changedTops.add(d.folder); f.copies.forEach((c) => changedTops.add(topFolder(c.path))); }
-  const unchanged = approved().filter((f) => !changedTops.has(f)).length;
+  const tops = [...root.children.values()].sort((a, b) => a.name.localeCompare(b.name)).map((k) => node(k, prefix + k.name, 0)).join('');
+  const html = tops + extras.filter(([n]) => totalOf(n)).map(([n, key]) => node(n, key, 0)).join('');
+  const matches = q ? [...root.children.values()].reduce((sum, k) => sum + hits.get(k), 0) + extras.reduce((sum, [n]) => sum + hits.get(n), 0) : 0;
+  return { html, matches, shown: q ? TREE_MATCH_CAP - budget.left : 0 };
+}
+
+/** The "Before" and "After" tree bodies. Redrawn on their own while typing in the tree search box. */
+function treeBodies(P) {
+  const { t, unchanged } = P.trees;
+  const q = S.review.query.trim().toLowerCase();
   const deletedZero = 0; // the plan never deletes anything
+  const note = (r) => (q && r.matches > r.shown ? `<div class="tree-note">Showing the first ${fmtN(r.shown)} of ${fmtN(r.matches)} matching files. Type more to narrow the search.</div>` : '');
+  const before = treeHtml(t.before, 'b:', q);
+  const after = treeHtml(t.after, 'a:', q, [[t.notSorted, 'a:__notsorted'], [t.hold, 'a:__hold'], [t.leftInPlace, 'a:__left']]);
+  return {
+    before: before.html + note(before),
+    after: after.html + note(after)
+      + `<div class="tree-foot">${unchanged} other folders unchanged · ${t.shortcuts} shortcut${t.shortcuts === 1 ? '' : 's'} left in old locations · ${deletedZero} files deleted</div>`,
+  };
+}
+
+function folderTrees(P) {
+  const b = treeBodies(P);
+  const search = `<div class="search"><input type="search" data-act-input="tree-q" placeholder="Search file names" aria-label="Search file names in the folder tree" value="${esc(S.review.query)}" autocomplete="off"></div>`;
   return `<div class="trees">
     <div class="card tree"><div class="th"><h3>Before · today</h3><p>${esc(PROPERTY.name)}, every copy where it lives now</p></div>
-      <div class="search"><input data-act-input="tree-q" placeholder="Search file names" value="${esc(S.review.query)}"></div>
-      ${tops(t.before, 'b:')}</div>
+      ${search}
+      <div class="tree-body" data-tree="before">${b.before}</div></div>
     <div class="card tree"><div class="th"><h3>After · simulated cleanup</h3><p>One copy of each sorted file, in its chosen folder</p></div>
-      <div class="search"><input data-act-input="tree-q" placeholder="Search file names" value="${esc(S.review.query)}"></div>
-      ${tops(t.after, 'a:')}
-      ${countFiles(t.notSorted) ? node(t.notSorted, 'a:__notsorted', 0) : ''}
-      ${countFiles(t.hold) ? node(t.hold, 'a:__hold', 0) : ''}
-      ${countFiles(t.leftInPlace) ? node(t.leftInPlace, 'a:__left', 0) : ''}
-      <div class="tree-foot">${unchanged} other folders unchanged · ${t.shortcuts} shortcut${t.shortcuts === 1 ? '' : 's'} left in old locations · ${deletedZero} files deleted</div></div>
+      ${search}
+      <div class="tree-body" data-tree="after">${b.after}</div></div>
   </div>`;
 }
-function hasMatch(n, q) { return n.files.some((f) => f.name.toLowerCase().includes(q)) || [...n.children.values()].some((k) => hasMatch(k, q)); }
+
+// ---------- Review: debounced search boxes ----------
+// Typing never redraws the whole page. After a short pause, only the list (or the two trees) is redrawn.
+const pending = { list: null, tree: null };
+function applyListSearch(value) {
+  S.review.search = value; S.review.page = 1;
+  const box = $('#rv-results');
+  if (box) box.innerHTML = reviewResults(planState());
+}
+function applyTreeSearch(value) {
+  S.review.query = value;
+  const bodies = document.querySelectorAll('.tree-body');
+  if (!bodies.length) return;
+  const b = treeBodies(planState());
+  for (const el of bodies) el.innerHTML = el.dataset.tree === 'before' ? b.before : b.after;
+  for (const i of document.querySelectorAll('[data-act-input="tree-q"]')) if (i.value !== value) i.value = value; // keep both boxes alike
+}
+function debounceSearch(kind, value) {
+  clearTimeout(pending[kind]?.timer);
+  const fn = kind === 'list' ? applyListSearch : applyTreeSearch;
+  pending[kind] = { value, timer: setTimeout(() => { pending[kind] = null; fn(value); }, SEARCH_DEBOUNCE_MS) };
+}
+/** Apply any search the person has typed but that hasn't fired yet (called before a full redraw, so nothing typed is lost). */
+function flushPendingSearch() {
+  for (const kind of ['list', 'tree']) {
+    const p = pending[kind];
+    if (!p) continue;
+    clearTimeout(p.timer); pending[kind] = null;
+    if (kind === 'list') { S.review.search = p.value; S.review.page = 1; } else S.review.query = p.value;
+  }
+}
 
 const scopeText = () => (setting('scopeFolder') ? `${setting('scopeFolder')}${setting('scopeSubfolder') ? ' › ' + setting('scopeSubfolder') : ''}` : 'All folders') + ` · first ${setting('scopeFirstN')}`;
 
 // ---------- Modals ----------
 /** A write failed: say so plainly and offer the export, rather than pretending it saved. */
 function showSaveError() {
+  announce(`Not saved. ${store.error || 'The last change could not be saved.'}`, { assertive: true });
   openModal(`${modalHead('Not saved')}<div class="content">
     <p style="margin:0"><b>${esc(store.error || 'The last change could not be saved.')}</b> Nothing was lost from before it, but new decisions can't be saved in this browser right now.</p>
     <p style="margin:0">Please export your decisions now, then tell TW (Report issue).</p>
   </div><footer><button class="btn" data-act="close-modal">Close</button><button class="btn primary" data-act="export">Export .xlsx now</button></footer>`);
 }
 
+// Every dialog goes through openModal/closeModal, so the accessibility behaviour lives here once:
+// role=dialog + aria-modal + aria-labelledby (the first <h2>), the page behind is inert, focus moves in
+// (first form control, else the footer's main button), Tab is trapped (see bindGlobalEvents), Escape closes
+// unless the dialog is locked, and focus goes back to whatever opened it (keyboard use only, see a11y.js).
+const FOCUS_FALLBACK = '[data-tour="decision"] h2'; // where focus lands if the opener was redrawn away
+let menuReturn = null; // a menu item opened a dialog: the dialog should return focus to the menu's button
+const takeMenuReturn = () => { const m = menuReturn; menuReturn = null; return m && Date.now() - m.at < 3000 ? m.op : null; };
+
 function openModal(html, { wide = false, onClose, locked = false } = {}) {
-  closeModal();
+  const prev = S.modal;
+  const opener = prev ? prev.opener : (takeMenuReturn() || captureOpener());
+  if (prev) closeModal(false); // replaced by another dialog: the first opener still gets focus back at the end
   const ov = document.createElement('div');
   ov.className = 'overlay';
-  ov.innerHTML = `<div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">${html}</div>`;
+  ov.innerHTML = `<div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true" tabindex="-1">${html}</div>`;
+  const box = ov.firstElementChild;
+  const title = $('h2', box);
+  if (title) { title.id = 'modal-title'; box.setAttribute('aria-labelledby', 'modal-title'); }
   if (!locked) ov.addEventListener('mousedown', (e) => { if (e.target === ov) closeModal(); });
   document.body.appendChild(ov);
-  S.modal = { el: ov, onClose, locked };
-  setTimeout(() => ov.querySelector('[autofocus]')?.focus() || ov.querySelector('input, textarea, select, button')?.focus(), 0);
+  $('#app').inert = true;
+  S.modal = { el: ov, onClose, locked, opener, inert: true };
+  (ov.querySelector('[autofocus]') || $('.content input, .content select, .content textarea', ov) || $('.content button', ov)
+    || $('footer .primary', ov) || $('footer button', ov) || $('.x', ov) || box).focus();
   renderStatus();
   return ov;
 }
-function closeModal() {
-  if (!S.modal) return;
-  S.modal.el.remove();
-  const cb = S.modal.onClose;
+function closeModal(restore = true) {
+  const m = S.modal;
+  if (!m) return;
+  m.el.remove();
   S.modal = null;
-  cb?.();
+  if (m.inert) $('#app').inert = false;
+  m.onClose?.();
   renderStatus();
+  if (restore) restoreFocus(m.opener, FOCUS_FALLBACK);
 }
 const modalHead = (title) => `<header><h2>${title}</h2><button class="x" data-act="close-modal" aria-label="Close">×</button></header>`;
 
@@ -810,12 +1070,15 @@ function issueCard(r) {
 }
 
 function openNote() {
+  if (S.practice) { toast("Notes aren't used in practice."); return; }
   const f = currentFile();
   if (!f) return;
+  const opener = captureOpener();
   const anchor = $('[data-act="note"]')?.getBoundingClientRect();
   const pop = document.createElement('div');
   pop.className = 'note-pop';
   pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-modal', 'true');
   pop.setAttribute('aria-label', `Note about ${f.name}`);
   pop.style.top = `${(anchor?.bottom || 120) + 8}px`;
   pop.style.left = `${Math.max(16, (anchor?.right || 400) - 360)}px`;
@@ -824,13 +1087,13 @@ function openNote() {
     <button class="btn sm" data-n="cancel">Cancel</button><button class="btn sm primary" data-n="save">Save note</button></div>`;
   document.body.appendChild(pop);
   const inp = pop.querySelector('input');
-  const done = () => { pop.remove(); S.modal = null; renderStatus(); };
+  const done = () => closeModal();
   const save = () => {
     const text = inp.value.trim();
     if (text && !store.addNote(f.id, { text, by: S.person, byName: me().name, at: new Date().toISOString(), appVersion: S.pkg.version }).ok) { done(); showSaveError(); return; }
     done(); render(); if (text) toast('Note saved.');
   };
-  S.modal = { el: pop, onClose: null };
+  S.modal = { el: pop, onClose: null, opener };
   inp.focus();
   inp.addEventListener('keydown', (e) => {
     e.stopPropagation();
@@ -843,7 +1106,26 @@ function openNote() {
   // Clicking elsewhere keeps the draft open (it's never silently thrown away).
 }
 
+// The one selection rule for a folder decision. The preview and the apply step both call this,
+// so what the modal promises is exactly what gets written. Excluded folders never reach S.allFiles
+// (they are dropped when the inventory loads), so they cannot appear here.
+function folderBatch(p) {
+  const inFolder = (x) => x.copies.some((c) => (pathParts(c.path).join('/')).startsWith(p + '/'));
+  const inScope = new Set(S.files.map((x) => x.id));
+  const included = [];
+  const excludedFiles = [];
+  for (const x of S.allFiles) {
+    if (!inFolder(x)) continue;
+    if (!inScope.has(x.id)) excludedFiles.push({ file: x, reason: 'outside the test scope' });
+    else if (decisionsById()[x.id]) excludedFiles.push({ file: x, reason: 'already decided' });
+    else if (store.claimedByOther(x.id, S.person, setting('claimIdleMinutes'))) excludedFiles.push({ file: x, reason: 'claimed by another person' });
+    else included.push(x);
+  }
+  return { included, excluded: excludedFiles };
+}
+
 function openFolderDecision() {
+  if (S.practice) return;
   const f = currentFile();
   if (!f) return;
   // Every folder level (below the library) that holds a copy of this file.
@@ -861,13 +1143,23 @@ function openFolderDecision() {
       <label class="field"><span>Send them all to</span><select id="fd-dest">${approved().map((o) => `<option ${o === pick ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></label>
     </div>
     <footer><button class="btn" data-act="close-modal">Cancel</button><button class="btn primary" id="fd-go">Send files</button></footer>`, { wide: true });
-  const filesIn = (p) => S.files.filter((x) => !decisionsById()[x.id] && !store.claimedByOther(x.id, S.person, setting('claimIdleMinutes')) && x.copies.some((c) => (pathParts(c.path).join('/')).startsWith(p + '/')));
+  const plural = (n) => `file${n === 1 ? '' : 's'}`;
+  // Show the copy that sits under the chosen folder (falls back to the first copy).
+  const where = (x, p) => esc(folderCrumb((x.copies.find((c) => pathParts(c.path).join('/').startsWith(p + '/')) || x.copies[0]).path));
+  const row = (x, extra) => `<li><span class="fd-name">${esc(x.name)}</span><span class="fd-path muted">${where(x, ov.querySelector('#fd-path').value)}${x.copies.length > 1 ? ` · ${x.copies.length} copies` : ''}</span>${extra ? `<span class="fd-why">${esc(extra)}</span>` : ''}</li>`;
   const update = () => {
     const p = ov.querySelector('#fd-path').value;
-    const list = filesIn(p);
-    ov.querySelector('#fd-info').innerHTML = `<b>${list.length} unsorted file${list.length === 1 ? '' : 's'}</b> in ${esc(p.replace(/\//g, ' › '))}${list.length ? `: ${list.slice(0, 6).map((x) => esc(x.name)).join(', ')}${list.length > 6 ? `, and ${list.length - 6} more` : ''}` : ''}`;
-    ov.querySelector('#fd-go').textContent = `Send ${list.length} file${list.length === 1 ? '' : 's'} to ${ov.querySelector('#fd-dest').value}`;
-    ov.querySelector('#fd-go').disabled = !list.length;
+    const dest = ov.querySelector('#fd-dest').value;
+    const { included: list, excluded: skipped } = folderBatch(p);
+    const reasons = {};
+    for (const e of skipped) reasons[e.reason] = (reasons[e.reason] || 0) + 1;
+    const why = Object.entries(reasons).map(([r, n]) => `${n} ${r}`).join(', ');
+    const shown = list.slice(0, 200);
+    ov.querySelector('#fd-info').innerHTML = `<div><b>${list.length} ${plural(list.length)} will go to ${dest ? esc(dest) : 'the folder you choose'}.</b>${skipped.length ? ` ${skipped.length} ${plural(skipped.length)} ${skipped.length === 1 ? 'is' : 'are'} excluded (${esc(why)}).` : ''}</div>
+      ${list.length ? `<ul class="fd-list" aria-label="Files that will be sent">${shown.map((x) => row(x)).join('')}${list.length > shown.length ? `<li class="fd-more muted">…and ${list.length - shown.length} more</li>` : ''}</ul>` : ''}
+      ${skipped.length ? `<details class="fd-ex"${ov.querySelector('#fd-info details')?.open ? ' open' : ''}><summary>Excluded (${skipped.length})</summary><ul class="fd-list">${skipped.slice(0, 200).map((e) => row(e.file, e.reason)).join('')}${skipped.length > 200 ? `<li class="fd-more muted">…and ${skipped.length - 200} more</li>` : ''}</ul></details>` : ''}`;
+    ov.querySelector('#fd-go').textContent = `Send ${list.length} ${plural(list.length)}${dest ? ` to ${dest}` : ''}`;
+    ov.querySelector('#fd-go').disabled = !list.length || !dest;
   };
   ov.querySelector('#fd-path').onchange = update;
   ov.querySelector('#fd-dest').onchange = update;
@@ -875,7 +1167,7 @@ function openFolderDecision() {
   ov.querySelector('#fd-go').onclick = () => {
     const p = ov.querySelector('#fd-path').value;
     const dest = ov.querySelector('#fd-dest').value;
-    const list = filesIn(p);
+    const list = folderBatch(p).included;
     if (!list.length) { update(); toast('No unsorted files left in that folder.'); return; }
     const batchId = uid('folder');
     const at = new Date().toISOString();
@@ -887,12 +1179,13 @@ function openFolderDecision() {
     closeModal();
     showFile(available()[0] || null);
     render();
+    announce(`Sent ${rows.length} file${rows.length === 1 ? '' : 's'} to ${dest}.`);
   };
 }
 
 async function openRules() {
   const md = await fetch('sorting-rules.md', { cache: 'no-store' }).then((r) => r.text()).catch(() => 'Could not load the rulebook.');
-  openModal(`${modalHead('Sorting rules')}<div class="content rules-md">${miniMarkdown(md)}</div><footer><span class="muted small" style="margin-right:auto">Edit <code>sorting-rules.md</code> to change these. Claude gets the rulebook with every suggestion.</span><button class="btn" data-act="close-modal">Close</button></footer>`, { wide: true });
+  openModal(`${modalHead('Sorting rules')}<div class="content rules-md">${miniMarkdown(md)}</div><footer><span class="muted small" style="margin-right:auto">Edit <code>sorting-rules.md</code> to change these. In phase 4, Claude will get this rulebook with every suggestion.</span><button class="btn" data-act="close-modal">Close</button></footer>`, { wide: true });
 }
 function miniMarkdown(md) {
   const out = [];
@@ -988,29 +1281,58 @@ function openSettings() {
 }
 
 // ---------- Menus ----------
-function openMenu(anchorEl, html) {
+let menuOpener = null; // the control that opened the open menu (keyboard use only)
+function openMenu(anchorEl, html, label) {
+  if ($('#menu')?.dataset.for === anchorEl.dataset.act) { closeMenu(); return; } // the button toggles its menu
   closeMenu();
+  menuOpener = captureOpener();
   const r = anchorEl.getBoundingClientRect();
   const m = document.createElement('div');
   m.className = 'menu'; m.id = 'menu';
+  m.dataset.for = anchorEl.dataset.act;
+  m.setAttribute('role', 'menu');
+  if (label) m.setAttribute('aria-label', label);
   m.innerHTML = html;
+  m.querySelectorAll('button').forEach((b) => b.setAttribute('role', 'menuitem'));
+  m.querySelectorAll('.sep').forEach((x) => x.setAttribute('role', 'separator'));
   m.style.top = `${r.bottom + 6}px`;
   m.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
   document.body.appendChild(m);
+  syncExpanded();
+  if (menuOpener) m.querySelector('button')?.focus(); // keyboard users land on the first item
   setTimeout(() => document.addEventListener('mousedown', outsideMenu), 0);
 }
-function outsideMenu(e) { if (!e.target.closest('#menu')) closeMenu(); }
-function closeMenu() { $('#menu')?.remove(); document.removeEventListener('mousedown', outsideMenu); }
+function outsideMenu(e) {
+  const m = $('#menu');
+  if (m && !e.target.closest('#menu') && !e.target.closest(`[data-act="${m.dataset.for}"]`)) closeMenu();
+}
+function closeMenu() {
+  const m = $('#menu');
+  if (!m) return;
+  m.remove();
+  document.removeEventListener('mousedown', outsideMenu);
+  syncExpanded();
+  if (menuOpener) { menuReturn = { op: menuOpener, at: Date.now() }; restoreFocus(menuOpener, FOCUS_FALLBACK); menuOpener = null; }
+}
+/** aria-expanded on the buttons that open menus. Called after every redraw too, since the top bar is rebuilt. */
+function syncExpanded() {
+  const open = $('#menu')?.dataset.for;
+  document.querySelectorAll('[data-act="help-menu"], [data-act="profile-menu"]').forEach((b) => b.setAttribute('aria-expanded', String(b.dataset.act === open)));
+}
+
+/** Role line shown under a profile's initials, from the PEOPLE flags. */
+const roleOf = (p) => (p.admin ? (p.reviewer ? 'Admin · reviewer' : 'Admin') : p.reviewer ? 'Reviewer' : 'Sorter');
 
 function profileMenu(el) {
-  openMenu(el, `${PEOPLE.map((p) => `<button data-act="set-person" data-val="${p.id}">${avatar(p, 'sm')} ${esc(p.name)}${p.id === S.person ? `<span class="check">${I.check.replace('<svg', '<svg width="16" height="16"')}</span>` : ''}</button>`).join('')}
-    <div class="sep"></div><div class="note">Beta: pick your name. After the beta, your Microsoft sign-in sets this automatically.</div>`);
+  openMenu(el, `${PEOPLE.map((p) => `<button data-act="set-person" data-val="${p.id}">${avatar(p, 'sm')} <span class="role">${esc(roleOf(p))}</span>${p.id === S.person ? `<span class="check">${I.check.replace('<svg', '<svg width="16" height="16"')}</span>` : ''}</button>`).join('')}
+    <div class="sep"></div><div class="note">Beta: pick your name. After the beta, your Microsoft sign-in sets this automatically.</div>`, 'Profile');
 }
 function helpMenu(el) {
-  openMenu(el, `<button data-act="tour">Replay the tour</button><button data-act="rules">Sorting rules</button><button data-act="thumb-help">Thumbnails not showing?</button><button data-act="settings">${isAdmin() ? 'Settings (admin)' : 'Settings'}</button><div class="sep"></div><button data-act="about">About · v${esc(S.pkg.version)}</button>`);
+  openMenu(el, `<button data-act="tour">Show me around</button><button data-act="intro">Show intro</button><button data-act="rules">Sorting rules</button><button data-act="thumb-help">Thumbnails not showing?</button><button data-act="settings">${isAdmin() ? 'Settings (admin)' : 'Settings'}</button><div class="sep"></div><button data-act="about">About · v${esc(S.pkg.version)}</button>`, 'Help');
 }
 
 function setPerson(id) {
+  S.practice = null;
   if (S.person && S.person !== id) store.releaseClaims(S.person);
   S.person = id;
   localStorage.setItem(DEVICE_PERSON_KEY, id);
@@ -1039,7 +1361,7 @@ function openProfilePicker() {
   const ov = openModal(`<header><h2>Choose your profile</h2></header>
     <div class="content">
       <p style="margin:0">Every decision is saved under your initials, the file you have open is held for you, and your keypad numbers are your own. So this comes first.</p>
-      <div class="profiles">${PEOPLE.map((p) => `<button data-pick="${p.id}"><span class="avatar lg" style="background:${p.color}">${p.initials}</span>${esc(p.name)}</button>`).join('')}</div>
+      <div class="profiles">${PEOPLE.map((p) => `<button data-pick="${p.id}"><span class="avatar lg" style="background:${p.color}">${esc(p.initials)}</span><span class="role">${esc(roleOf(p))}</span></button>`).join('')}</div>
       <div class="muted small">After the beta, your Microsoft sign-in sets this automatically.</div>
     </div>`, { locked: true });
   ov.querySelector('.profiles').onclick = (e) => {
@@ -1047,24 +1369,42 @@ function openProfilePicker() {
     if (!b) return;
     closeModal();
     setPerson(b.dataset.pick);
-    if (!prefs().tourDone) openTour(0);
+    if (!seenIntro()) openIntro();
   };
 }
 
+/** The short first-run intro. Seen once per person (prefs.introSeen); the ? menu can show it again. */
+function openIntro() {
+  endPractice(true);
+  S.view = 'sort';
+  if (!currentFile()) S.source = 'remaining';
+  render();
+  startIntro({
+    opener: takeMenuReturn() || captureOpener(), initials: me()?.initials || '', folderCount: approved().length,
+    finish: (how) => {
+      if (S.person) store.setPrefs(S.person, { introSeen: true });
+      if (how === 'practice') startPractice();
+      else if (how === 'tour') openTour(0);
+      else render();
+    },
+  });
+}
+
 function openTour(startAt = 0) {
+  endPractice(true);
   S.view = 'sort';
   if (!currentFile()) S.source = 'remaining';
   render();
   startTour({
-    startAt, version: S.pkg.version, propertyName: PROPERTY.name,
+    opener: takeMenuReturn() || captureOpener(), startAt, version: S.pkg.version, propertyName: PROPERTY.name,
     finish: (how) => { if (S.person) store.setPrefs(S.person, { tourDone: how }); render(); },
   });
 }
 
 // ---------- Events ----------
 const actions = {
-  view: (d) => { S.view = d.val; S.confirm = null; render(); },
-  source: (d) => { S.source = d.val; S.confirm = null; showFile(available()[0] || null); render(); },
+  view: (d) => { endPractice(true); S.view = d.val; S.confirm = null; render(); },
+  source: (d) => { endPractice(true); S.source = d.val; S.confirm = null; showFile(available()[0] || null); render(); },
   mode: (d) => {
     store.setPrefs(S.person, { mode: d.val }); render();
     if (d.val === 'keypad' && !prefs().keypadTipSeen) { store.setPrefs(S.person, { keypadTipSeen: true }); maybeKeypadTip(setting('keypadLearningFiles')); }
@@ -1115,39 +1455,64 @@ const actions = {
   'help-menu': (d, el) => helpMenu(el),
   'set-person': (d) => {
     closeMenu(); setPerson(d.val);
-    if (!prefs().tourDone) openTour(0);
+    if (!seenIntro()) openIntro();
   },
   tour: () => { closeMenu(); openTour(0); },
+  intro: () => { closeMenu(); openIntro(); },
+  'practice-done': () => endPractice(),
   rules: () => { closeMenu(); openRules(); },
   settings: () => { closeMenu(); openSettings(); },
   about: () => { closeMenu(); openAbout(); },
   'close-modal': () => closeModal(),
   'review-tab': (d) => { S.review.tab = d.val; render(); },
-  'rf-folder': (d) => { S.review.folder = d.val; render(); },
+  'rf-folder': (d) => { S.review.folder = d.val; S.review.page = 1; render(); },
+  'rv-queue': (d) => { S.review.queue = d.val; S.review.page = 1; render(); },
+  'rv-page': (d, el, e) => {
+    const R = S.review;
+    R.page += d.val === 'next' ? 1 : -1; // reviewResults() keeps it within range
+    const which = [...document.querySelectorAll('#rv-results .pager')].indexOf(el.closest('.pager')); // top or bottom pager
+    $('#rv-results').innerHTML = reviewResults(planState());
+    const head = $('#rv-results .list-head');
+    if (head) window.scrollTo({ top: Math.max(0, head.getBoundingClientRect().top + window.scrollY - 90) });
+    const info = $('#rv-results .pg-info')?.textContent;
+    if (info) announce(info);
+    // Operated from the keyboard: the pager was redrawn, so put focus back on the same button (or its neighbour at either end).
+    if (e && e.detail === 0) {
+      const pagers = document.querySelectorAll('#rv-results .pager');
+      const nav = pagers[Math.min(Math.max(which, 0), pagers.length - 1)];
+      (nav?.querySelector(`[data-val="${d.val}"]:not(:disabled)`) || nav?.querySelector('button:not(:disabled)'))?.focus({ preventScroll: true });
+    }
+  },
+  'goto-approval': () => {
+    const card = $('.approval');
+    card?.scrollIntoView({ block: 'center' });
+    ($('.approval [data-act="approve-plan"]:not([disabled])') || $('.approval [data-act="export-plan"][data-kind="approved"]'))?.focus({ preventScroll: true });
+  },
   'mark-reviewed': (d) => {
     if (!me()?.reviewer) return toast('Only TW or KB can mark decisions reviewed.');
     const cur = decisionsById()[d.id];
     if (!cur) return;
     if (cur.reviewedBy) store.editDecision(d.id, { reviewedBy: '', reviewedByName: '', reviewedAt: '' });
     else store.editDecision(d.id, { reviewedBy: S.person, reviewedByName: me().name, reviewedAt: new Date().toISOString() });
-    render();
+    renderKeepScroll();
   },
   'toggle-shortcuts': () => { if (S.person) { store.setPrefs(S.person, { shortcutsOff: !prefs().shortcutsOff }); render(); } },
-  'tree-toggle': (d) => {
+  'tree-toggle': (d, el, e) => {
     const key = d.key, o = S.review.open;
     const depth0 = d.depth === '0';
     const isOpen = o.has(key) || (depth0 && !o.has('x:' + key));
     if (isOpen) { o.delete(key); if (depth0) o.add('x:' + key); } else { o.add(key); o.delete('x:' + key); }
     render();
+    // Operated from the keyboard (click with detail 0): the row was redrawn, so put focus back on it.
+    if (e && e.detail === 0) [...document.querySelectorAll('.trow[data-key]')].find((r) => r.dataset.key === key)?.focus({ preventScroll: true });
   },
 };
 
 const changeActions = {
   'issue-status': (el) => { store.updateIssue(el.dataset.id, { status: el.value, statusBy: S.person, statusAt: new Date().toISOString() }); render(); },
-  'rf-person': (el) => { S.review.person = el.value; render(); },
-  'rf-type': (el) => { S.review.type = el.value; render(); },
-  'rf-changed': (el) => { S.review.changed = el.checked; render(); },
-  'rf-unreviewed': (el) => { S.review.unreviewed = el.checked; render(); },
+  'rf-person': (el) => { S.review.person = el.value; S.review.page = 1; render(); },
+  'rf-type': (el) => { S.review.type = el.value; S.review.page = 1; render(); },
+  'rf-changed': (el) => { S.review.changed = el.checked; S.review.page = 1; render(); },
   'edit-folder': (el) => {
     const id = el.dataset.id;
     const f = S.fileById[id];
@@ -1157,7 +1522,7 @@ const changeActions = {
     store.editDecision(id, { folder, accepted: !!f.suggestion && folder === f.suggestion.folder, keptPath: kept?.path || null, keptSize: kept?.size ?? null, keptModified: kept?.modified || null,
       editedBy: me().name, editedAt: new Date().toISOString(), reviewedBy: '', reviewedByName: '', reviewedAt: '' });
     toast(`${f.name} → ${folder} (edited in review by ${me().name}).`);
-    render();
+    renderKeepScroll(); // same page of the list, same scroll position
   },
 };
 
@@ -1168,6 +1533,7 @@ function toggleAllFolders(force) {
 }
 
 function bindGlobalEvents() {
+  initA11y();
   document.addEventListener('click', (e) => {
     const el = e.target.closest('[data-act]');
     if (!el || el.disabled) return;
@@ -1196,13 +1562,8 @@ function bindGlobalEvents() {
       S.folderFilter = e.target.value; S.folderHl = 0;
       $('#folder-list').innerHTML = folderListItems();
     }
-    if (e.target.dataset.actInput === 'tree-q') {
-      S.review.query = e.target.value;
-      const pos = e.target.selectionStart, idx = [...document.querySelectorAll('[data-act-input="tree-q"]')].indexOf(e.target);
-      render();
-      const again = document.querySelectorAll('[data-act-input="tree-q"]')[idx];
-      again?.focus(); again?.setSelectionRange(pos, pos);
-    }
+    if (e.target.dataset.actInput === 'tree-q') debounceSearch('tree', e.target.value);
+    if (e.target.dataset.actInput === 'rv-q') debounceSearch('list', e.target.value);
   });
   document.addEventListener('toggle', (e) => {
     const d = e.target.closest?.('[data-act-toggle]');
@@ -1212,11 +1573,13 @@ function bindGlobalEvents() {
   document.addEventListener('focusin', renderStatus);
   document.addEventListener('focusout', () => setTimeout(renderStatus, 0));
   document.addEventListener('keydown', onKey);
+  // Tab stays inside an open dialog. Capture phase, so the note box (which stops its own keys) is covered too.
+  document.addEventListener('keydown', (e) => { if (S.modal && !tourActive()) trapTab(e, S.modal.el); }, true);
   // Closing the tab releases this person's hold and keeps an end-of-session copy. Neither rewrites decisions.
   window.addEventListener('beforeunload', () => { if (S.person) store.releaseClaims(S.person); store.backupSession(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') store.backupSession(); });
   // Activity keeps the hold on the file on screen; it's released after the idle time with no activity.
-  const touch = () => { if (S.view === 'sort' && S.person && S.currentId) store.touchClaim(S.currentId, S.person); };
+  const touch = () => { if (S.view === 'sort' && S.person && S.currentId && !S.practice) store.touchClaim(S.currentId, S.person); };
   document.addEventListener('keydown', touch, true);
   document.addEventListener('pointerdown', touch, true);
   document.addEventListener('focusout', () => setTimeout(() => { if (S.redrawLater && !S.modal) { S.redrawLater = false; render(); } }, 0));
@@ -1232,7 +1595,19 @@ function onKey(e) {
   const typing = a && (a.matches('input, textarea, select') || a.isContentEditable);
 
   if (S.modal) { if (e.key === 'Escape' && !S.modal.locked) { e.preventDefault(); closeModal(); } return; }
-  if ($('#menu')) { if (e.key === 'Escape') closeMenu(); return; }
+  const menu = $('#menu');
+  if (menu) {
+    const items = [...menu.querySelectorAll('button')], i = items.indexOf(a);
+    if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); closeMenu(); }
+    else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key) && items.length) {
+      e.preventDefault();
+      const to = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : e.key === 'ArrowDown' ? (i + 1) % items.length : (i <= 0 ? items.length - 1 : i - 1);
+      items[to].focus();
+    }
+    return;
+  }
+  // Review tree rows are role=button: Enter or Space opens and closes them.
+  if (a && a.matches('.trow[data-act]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); if (!e.repeat) a.click(); return; }
 
   // Folder filter box: arrows move, Enter picks, Esc closes.
   if (a && a.id === 'folder-filter') {
@@ -1250,8 +1625,16 @@ function onKey(e) {
   if (S.view !== 'sort' || !S.person || prefs().shortcutsOff) return;
   const key = NUMPAD[e.code] || e.key;
   // A focused button or link keeps its own Enter/Space behaviour: never turn it into "accept the suggestion".
-  if ((key === 'Enter' || key === ' ') && a && a !== document.body && a.matches('button, a, summary, [tabindex]')) return;
+  if ((key === 'Enter' || key === ' ') && a && a !== document.body && a.matches('button, a, summary, [tabindex]:not([tabindex="-1"])')) return;
   const shortcut = key === 'Enter' || key === '/' || key === '.' || key === 'n' || key === 'N' || /^[0-9]$/.test(key);
+  if (S.practice) {
+    if (key === 'Escape' && !S.allFoldersOpen) { e.preventDefault(); endPractice(); return; }
+    if (S.practice.done && shortcut) { // after the pick: only Enter does anything (Start sorting), and not within 400 ms of the pick
+      e.preventDefault();
+      if (key === 'Enter' && !e.repeat && Date.now() - S.practice.doneAt >= 400) endPractice();
+      return;
+    }
+  }
   if (!shortcut) { if (key === 'Escape' && S.allFoldersOpen) toggleAllFolders(false); return; }
   e.preventDefault();
   if (e.repeat) return; // holding a key down never sorts (or undoes) a run of files
@@ -1260,7 +1643,7 @@ function onKey(e) {
   if (!f) return;
   if (key === 'Enter') { if (f.suggestion) decide(f.suggestion.folder); return; }
   if (key === '/') { toggleAllFolders(true); return; }
-  if (key === '.') { if (S.source !== 'unsure') decide('Unsure'); return; }
+  if (key === '.') { if (S.source !== 'unsure' || S.practice) decide('Unsure'); return; }
   if (key === 'n' || key === 'N') { openNote(); return; }
   const n = +key;
   if (mode() === 'keypad') { const slot = keypadLayout(f).keys[n]; if (slot) decide(slot.folder); }

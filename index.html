@@ -1,8 +1,14 @@
 <!doctype html>
-<!-- JPC File Sorter · v0.4.1-beta · index.html -->
+<!-- JPC File Sorter · v0.5.0-beta · index.html -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <!-- Content-Security-Policy (GitHub Pages cannot send headers, so it lives here).
+       The sha256 is the hash of the inline theme script below, byte for byte. If that script changes,
+       recompute it (base64 of the sha256 of the exact text inside the script tags);
+       scripts/publish_preview.py refuses to publish when it does not match.
+       img-src allows any https: host because thumbnails come from the SharePoint tenant. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-9BaSbSYXB+vFgDr2gsqyxaRg03DdPOASi4Fvs6bv/mM='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; base-uri 'self'; form-action 'none'; object-src 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>JPC File Sorter</title>
   <link rel="icon" type="image/png" href="public/brand/Jay%20Paul%20Company%20Logo%20Image.png">
@@ -21,10 +27,16 @@
       } catch (e) { document.documentElement.dataset.theme = 'light'; }
     })();
   </script>
-  <!-- SheetJS for .xlsx export (writes files in the browser; nothing is uploaded) -->
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+  <!-- SheetJS for .xlsx export (writes files in the browser; nothing is uploaded).
+       Vendored from the npm tarball xlsx@0.18.5 (integrity-checked); licence in public/vendor/xlsx-LICENSE.txt.
+       0.18.5 has known CVEs in READING untrusted files. The app only writes workbooks, and the test page
+       only reads back workbooks it just created, so never use it to open a file someone else supplies. -->
+  <script src="public/vendor/xlsx-0.18.5.full.min.js" defer></script>
 </head>
 <body>
+  <!-- Screen-reader announcements (decisions, undo, save errors). Outside #app so redraws never remove them. -->
+  <div id="sr-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  <div id="sr-alert" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
   <div id="app"><p style="padding:40px;font-family:sans-serif">Loading File Sorter…</p></div>
   <script type="module" src="src/app.js"></script>
 </body>

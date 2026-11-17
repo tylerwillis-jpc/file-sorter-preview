@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.4.1-beta · config.js
+/* JPC File Sorter · v0.5.0-beta · config.js
  * All settings live here. The version itself lives only in package.json.
  * Admin-editable settings (folders, scope, etc.) start from these defaults and
  * can be overridden in the Settings panel (stored with the test data).

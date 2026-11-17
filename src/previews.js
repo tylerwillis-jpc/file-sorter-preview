@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.4.1-beta · previews.js
+/* JPC File Sorter · v0.5.0-beta · previews.js
  * Thumbnails, never full files. Keeps the next N files' thumbnails loading in the background
  * so the next file appears instantly after each keystroke.
  *
@@ -10,13 +10,17 @@
  *  3. A placeholder with the file type and size (also for very large files).
  */
 
+// The cache keeps at most this many thumbnails. Oldest finished entries go first; a still-loading
+// one is only dropped (and its download cancelled) if nothing else can be.
+const MAX_CACHE_ENTRIES = 300;
+
 const THUMB_TYPES = new Set(['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tif', 'tiff', 'heic', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'xlsm', 'ppt', 'pptx', 'mp4', 'mov']);
 
 export class Previewer {
   constructor({ largeFileBytes, onReady }) {
     this.largeFileBytes = largeFileBytes;
     this.onReady = onReady;      // called with fileId when a thumbnail finishes (ok or failed)
-    this.cache = new Map();      // fileId -> {state: 'loading'|'ok'|'none', src, reason}
+    this.cache = new Map();      // fileId -> {state: 'loading'|'ok'|'none'|'sample', src, reason}; insertion order = age
   }
 
   /** Thumbnail URL for one copy, or null if this file shouldn't get one. */
@@ -35,28 +39,64 @@ export class Previewer {
 
   /** Start loading thumbnails for these files (current first). Already-loaded ones are skipped. */
   preload(items) {
+    const wanted = new Set();
     for (const { file, copy } of items) {
-      if (this.cache.has(file.id)) continue;
+      wanted.add(file.id);
+      if (this.cache.has(file.id)) {
+        // Still wanted: move it to the newest end so it is evicted last.
+        const e = this.cache.get(file.id);
+        this.cache.delete(file.id);
+        this.cache.set(file.id, e);
+        continue;
+      }
       if (file.sample) { this.cache.set(file.id, { state: 'sample' }); continue; }
       const src = this.thumbUrl(file, copy);
       if (!src) {
         this.cache.set(file.id, { state: 'none', reason: file.size > this.largeFileBytes ? 'large' : 'type' });
         continue;
       }
-      const entry = { state: 'loading', src };
-      this.cache.set(file.id, entry);
       const img = new Image();
+      const entry = { state: 'loading', src, img };
+      this.cache.set(file.id, entry);
       img.referrerPolicy = 'no-referrer';
       const done = (ok) => {
+        if (entry.state !== 'loading') return; // already timed out or evicted
         // SharePoint answers some unsupported files with a tiny 1×1 image: treat that as "no thumbnail".
         entry.state = ok && img.naturalWidth > 2 ? 'ok' : 'none';
         if (entry.state === 'none') entry.reason = 'unavailable';
+        entry.img = null;
         this.onReady?.(file.id);
       };
       img.onload = () => done(true);
       img.onerror = () => done(false);
-      setTimeout(() => { if (entry.state === 'loading') { entry.state = 'none'; entry.reason = 'timeout'; this.onReady?.(file.id); } }, 15000);
+      setTimeout(() => {
+        if (entry.state === 'loading') { entry.state = 'none'; entry.reason = 'timeout'; entry.img = null; this.onReady?.(file.id); }
+      }, 15000);
       img.src = src;
+    }
+    this.evict(wanted);
+  }
+
+  /** Keep the cache at MAX_CACHE_ENTRIES: drop the oldest finished entries first, then (only if
+   *  needed) the oldest still-loading ones, cancelling their download. Never drops `keep`. */
+  evict(keep) {
+    let over = this.cache.size - MAX_CACHE_ENTRIES;
+    if (over <= 0) return;
+    for (const pass of ['finished', 'loading']) {
+      for (const [id, e] of this.cache) {
+        if (over <= 0) return;
+        if (keep.has(id)) continue;
+        const loading = e.state === 'loading';
+        if ((pass === 'finished') === loading) continue;
+        if (loading) {
+          e.state = 'evicted';
+          const img = e.img;
+          e.img = null;
+          if (img) { img.onload = null; img.onerror = null; img.src = ''; }
+        }
+        this.cache.delete(id);
+        over--;
+      }
     }
   }
 

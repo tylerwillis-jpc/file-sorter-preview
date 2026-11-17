@@ -1,4 +1,4 @@
-/* JPC File Sorter · v0.4.1-beta · plan.js
+/* JPC File Sorter · v0.5.0-beta · plan.js
  * Kept-copy rule and the simulated change plan. Nothing here performs any action:
  * it only describes what a future cleanup *would* do. See docs/change-plan-schema.md.
  *
@@ -21,7 +21,7 @@ import { DUPLICATE_HOLD_FOLDER, PROPERTY } from './config.js';
 import { pathParts, topFolder } from './util.js';
 
 const LIB = PROPERTY.library;
-export const SHORTCUT_EXT = '.url'; // proposal: an internet-shortcut file in the old spot (see schema doc)
+export const SHORTCUT_EXT = '.url'; // decided: an internet-shortcut file in the old spot (see docs/change-plan-schema.md)
 
 const baseName = (path) => path.split('/').at(-1);
 const lower = (p) => p.toLowerCase();
@@ -93,14 +93,26 @@ export function planForDecision(file, decision) {
   return actions;
 }
 
-export function buildPlan(files, decisions) {
+/**
+ * Work out every decision's actions once: fileId -> actions. Pass the result as `plans` to buildPlan,
+ * planSummary and conflictChecks so each decision is planned a single time instead of three. Output
+ * of those functions is identical with or without it.
+ */
+export function planByFile(files, decisions) {
+  const byId = new Map(files.map((f) => [f.id, f]));
+  const plans = new Map();
+  for (const d of decisions) { const f = byId.get(d.fileId); if (f) plans.set(f.id, planForDecision(f, d)); }
+  return plans;
+}
+
+export function buildPlan(files, decisions, plans = null) {
   const byId = new Map(files.map((f) => [f.id, f]));
   const actions = [];
-  for (const d of decisions) { const f = byId.get(d.fileId); if (f) actions.push(...planForDecision(f, d)); }
+  for (const d of decisions) { const f = byId.get(d.fileId); if (f) actions.push(...(plans?.get(f.id) ?? planForDecision(f, d))); }
   return actions;
 }
 
-export function planSummary(files, decisions) {
+export function planSummary(files, decisions, plans = null) {
   const byId = new Map(files.map((f) => [f.id, f]));
   let sorted = 0, move = 0, stays = 0, hold = 0, shortcuts = 0, reviewed = 0, unsure = 0, blocked = 0;
   for (const d of decisions) {
@@ -109,7 +121,7 @@ export function planSummary(files, decisions) {
     if (d.reviewedBy) reviewed++;
     if (d.folder === 'Unsure') { unsure++; continue; }
     sorted++;
-    for (const a of planForDecision(f, d)) {
+    for (const a of plans?.get(f.id) ?? planForDecision(f, d)) {
       if (a.action === 'Move') move++;
       else if (a.action === 'Stays') stays++;
       else if (a.action === 'Hold') hold++;
@@ -128,8 +140,9 @@ export function planSummary(files, decisions) {
  *   allFiles:  every file in the inventory
  *   decisions: decisions to check (the plan's scope)
  *   allDecisionsById: every decision, so other sorted files are placed where they'd really end up
+ *   plans: optional planByFile() result, so decisions already planned are not planned again
  */
-export function conflictChecks(allFiles, decisions, { maxPathLength = 400, sitePath = '', allDecisionsById = null } = {}) {
+export function conflictChecks(allFiles, decisions, { maxPathLength = 400, sitePath = '', allDecisionsById = null, plans = null } = {}) {
   const byId = new Map(allFiles.map((f) => [f.id, f]));
   const decById = allDecisionsById || Object.fromEntries(decisions.map((d) => [d.fileId, d]));
   const checkIds = new Set(decisions.map((d) => d.fileId));
@@ -139,7 +152,7 @@ export function conflictChecks(allFiles, decisions, { maxPathLength = 400, siteP
   const planned = new Map();
   for (const f of allFiles) {
     const d = decById[f.id];
-    const acts = d ? planForDecision(f, d) : [];
+    const acts = d ? (plans?.get(f.id) ?? planForDecision(f, d)) : [];
     planned.set(f.id, acts);
     if (!d || d.folder === 'Unsure' || acts.some((a) => a.action === 'Blocked')) { for (const c of f.copies) place(c.path, f.id); continue; }
     for (const a of acts) {
